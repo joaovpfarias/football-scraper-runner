@@ -54,8 +54,9 @@ def parse(html: str) -> dict:
     if gt:
         iso = parse_pt_datetime(gt.get_text(" ", strip=True)) or ""
 
-    score_home, score_away, status, sets_detail = "", "", "scheduled", ""
+    score_home, score_away, status, partials = "", "", "scheduled", ""
     score_home_ht, score_away_ht = "", ""
+    score_home_2h, score_away_2h = "", ""
 
     # Placar via live-info: "Resultado final <strong>2:1</strong> (sets detail)"
     li = soup.select_one('[data-testid="live-info"]')
@@ -83,13 +84,20 @@ def parse(html: str) -> dict:
             raw = paren.group(1)
             sets = re.findall(r'(\d+)\s*[:\-]\s*(\d+)', raw)
             if sets:
-                sets_detail = " ".join(f"{a}-{b}" for a, b in sets)
+                partials = " ".join(f"{a}-{b}" for a, b in sets)
                 # 1o parcial = 1o tempo (futebol) ou 1o set (tenis)
                 try:
                     score_home_ht = int(sets[0][0])
                     score_away_ht = int(sets[0][1])
                 except (ValueError, IndexError):
                     pass
+                # 2o parcial = 2o tempo (futebol) ou 2o set (tenis)
+                if len(sets) >= 2:
+                    try:
+                        score_home_2h = int(sets[1][0])
+                        score_away_2h = int(sets[1][1])
+                    except (ValueError, IndexError):
+                        pass
 
         # Fallback: texto livre sem <strong> (outros esportes)
         if status == "scheduled":
@@ -127,6 +135,8 @@ def parse(html: str) -> dict:
         "score_away":    score_away,
         "score_home_ht": score_home_ht,
         "score_away_ht": score_away_ht,
-        "sets_detail":   sets_detail,   # raw parciais: "2-0 3-0" (futebol) ou "6-7 7-6 6-2" (tenis)
+        "score_home_2h": score_home_2h,
+        "score_away_2h": score_away_2h,
+        "partials":     partials,    # raw parciais: "2-0 3-0" (futebol) ou "6-7 7-6 6-2" (tenis)
         "status":        status,
     }

@@ -362,7 +362,7 @@ def _scraped_urls(db_path: str, league_path: str, season: str) -> set:
               AND e.score_home IS NOT NULL AND e.score_home != ''
               AND (
                 e.status != 'finished'
-                OR (e.sets_detail IS NOT NULL AND e.sets_detail != '')
+                OR (e.partials IS NOT NULL AND e.partials != '')
               )
               AND EXISTS (
                 SELECT 1 FROM odds o JOIN markets m ON m.id = o.market_id
@@ -397,7 +397,7 @@ def _league_incomplete_events(db_path: str, league_path: str) -> list[dict]:
                   WHERE o.event_id = e.id AND m.name = 'home_away'
                 )
                 OR (e.status = 'finished'
-                    AND (e.sets_detail IS NULL OR e.sets_detail = ''))
+                    AND (e.partials IS NULL OR e.partials = ''))
               )
         """, (league_path,)).fetchall()
         con.close()
@@ -445,9 +445,11 @@ async def _process_match(
                 "home": home, "away": away,
                 "score_home": _coalesce_score(header.get("score_home"), m.get("score_home", "")),
                 "score_away": _coalesce_score(header.get("score_away"), m.get("score_away", "")),
-                "sets_detail": header.get("sets_detail", ""),
+                "partials": header.get("partials", ""),
                 "score_home_ht": header.get("score_home_ht", ""),
                 "score_away_ht": header.get("score_away_ht", ""),
+                "score_home_2h": header.get("score_home_2h", ""),
+                "score_away_2h": header.get("score_away_2h", ""),
                 "status": header.get("status", "scheduled"),
                 "venue": header.get("venue", ""), "venue_city": header.get("venue_city", ""),
                 "venue_country": header.get("venue_country", ""),
