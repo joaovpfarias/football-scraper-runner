@@ -1,0 +1,340 @@
+name: Football Scrape (parallel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempt:
+        description: 'Tentativa (auto-incrementado pelo job continue — nao editar manualmente)'
+        default: '1'
+        required: false
+
+permissions:
+  contents: write   # necessario para criar/editar releases (memoria permanente)
+  actions: write
+
+env:
+  PYTHON_VERSION: '3.12'
+  REQS: 'playwright playwright-stealth tenacity beautifulsoup4 lxml python-dateutil'
+  TOTAL_SHARDS: 10
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Discovery: gera o JSON com todos os slugs de torneios reais
+  # ---------------------------------------------------------------------------
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install deps
+        run: |
+          pip install ${{ env.REQS }}
+          playwright install --with-deps chromium
+
+      - name: Discovery only
+        env:
+          DISCOVER_ONLY: '1'
+        run: python astrology/scrapers/oddsportal/scrape_football_history.py
+
+      - name: Upload discovered slugs
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovered-football-slugs
+          path: astrology/scrapers/oddsportal/data/raw/discovered_football_leagues.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 2) Scrape: 20 jobs paralelos (limite free tier GitHub Actions)
+  # ---------------------------------------------------------------------------
+  scrape:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install deps
+        run: |
+          pip install ${{ env.REQS }}
+          playwright install --with-deps chromium
+
+      # Memória persistente: baixa o DB FINAL merged da última run concluída.
+      # Cada shard começa com TODOS os dados já raspados (não só os do shard anterior),
+      # então _scraped_urls() pula corretamente qualquer jogo já feito por qualquer shard.
+      # Fallback: tenta o Release 'latest' (persistência além de 90 dias de artifact).
+      - name: Download seed DB (DB final da ultima run ou release latest)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHARD_DB="${{ github.workspace }}/shard-${{ matrix.shard }}.db"
+          SEED_DIR="${{ github.workspace }}/seed"
+          mkdir -p "$SEED_DIR"
+
+          # Release 'latest' PRIMEIRO: e a fonte canonica protegida pelo guard
+          # monotonico (nunca encolhe). O artifact da ultima run pode estar craterado
+          # (seed falho/merge parcial), entao NAO confiar nele como primario.
+          echo "Baixando seed do Release football-latest (canonico)..."
+          gh release download football-latest \
+            --repo ${{ github.repository }} \
+            --pattern "football_history_full.db" \
+            --dir "$SEED_DIR/" 2>/dev/null && FOUND=1 || FOUND=0
+
+          # Fallback: artifact da ultima run concluida (caso o Release suma)
+          if [ "${FOUND:-0}" = "0" ]; then
+            echo "Release football-latest indisponivel — tentando artifact da ultima run..."
+            LAST_RUN=$(gh run list \
+              --workflow football-scrape.yml \
+              --repo ${{ github.repository }} \
+              --status completed \
+              --json databaseId \
+              --limit 1 \
+              --jq '.[0].databaseId')
+            if [ -n "$LAST_RUN" ] && [ "$LAST_RUN" != "null" ]; then
+              gh run download "$LAST_RUN" \
+                --repo ${{ github.repository }} \
+                --name football-history-final \
+                --dir "$SEED_DIR/" 2>/dev/null || echo "Sem artifact — iniciando do zero."
+            fi
+          fi
+
+          # Usa o DB como ponto de partida deste shard
+          SEED_FILE="$SEED_DIR/football_history_full.db"
+          if [ -f "$SEED_FILE" ]; then
+            cp "$SEED_FILE" "$SHARD_DB"
+            SZ=$(du -sh "$SHARD_DB" | cut -f1)
+            echo "Seed carregado ($SZ) — shard iniciara de onde parou."
+          else
+            echo "Sem seed — shard inicia do zero."
+          fi
+
+      - name: Download discovered slugs
+        uses: actions/download-artifact@v4
+        with:
+          name: discovered-football-slugs
+          path: astrology/scrapers/oddsportal/data/raw/
+
+      - name: Scrape shard ${{ matrix.shard }}
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          DB_PATH_OVERRIDE: ${{ github.workspace }}/shard-${{ matrix.shard }}.db
+        run: python astrology/scrapers/oddsportal/scrape_football_history.py
+
+      - name: Checkpoint WAL (garante dados no .db antes do upload)
+        if: always()
+        run: |
+          DB="${{ github.workspace }}/shard-${{ matrix.shard }}.db"
+          if [ -f "$DB" ]; then
+            SZ_BEFORE=$(stat -c%s "$DB")
+            python -c "import sqlite3; c=sqlite3.connect('$DB'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()"
+            SZ_AFTER=$(stat -c%s "$DB")
+            echo "WAL checkpoint OK: ${SZ_BEFORE} -> ${SZ_AFTER} bytes"
+          else
+            echo "DB nao encontrado: $DB"
+          fi
+
+      - name: Upload shard DB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: ${{ github.workspace }}/shard-${{ matrix.shard }}.db
+          retention-days: 90
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 3) Merge: junta os 20 DBs + seed historico num so DB final
+  # ---------------------------------------------------------------------------
+  merge:
+    needs: scrape
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install deps
+        run: pip install ${{ env.REQS }}
+
+      - name: Download all shard DBs
+        uses: actions/download-artifact@v4
+        with:
+          path: shards/
+          pattern: shard-*
+
+      - name: Download seed DB (dados historicos pre-GitHub Actions)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: football-seed-db
+          path: shards/seed/
+
+      - name: Merge shards + seed no DB final
+        run: |
+          python astrology/scrapers/oddsportal/merge_shards.py shards/ football_history_full.db
+
+      # FIX: continue-on-error para nao bloquear o upload do DB quando ha incompletos
+      - name: Quality gate — gera lista de ligas incompletas
+        id: quality
+        continue-on-error: true
+        run: |
+          python astrology/scrapers/oddsportal/quality_check.py football_history_full.db incomplete_leagues.json
+          echo "incomplete_count=$(python -c \"import json; d=json.load(open('incomplete_leagues.json')); print(len(d))\")" >> "$GITHUB_OUTPUT"
+
+      # FIX: if: always() garante que o DB e salvo mesmo com quality gate falhando
+      - name: Upload DB final
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: football-history-final
+          path: football_history_full.db
+          retention-days: 90
+
+      - name: Upload incomplete leagues manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incomplete-leagues
+          path: incomplete_leagues.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+      # Memoria permanente: publica o DB final como release 'latest'.
+      # Artifacts expiram em 90 dias; releases nao expiram.
+      # Proximas runs (mesmo meses depois) baixam esse release como seed.
+      - name: Publicar DB no release latest (memoria permanente)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f football_history_full.db ]; then
+            echo "DB nao encontrado — nao publicando release."
+            exit 0
+          fi
+          SZ=$(du -sh football_history_full.db | cut -f1)
+          EVENTS=$(python3 -c "
+          import sqlite3
+          con = sqlite3.connect('football_history_full.db')
+          n = con.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+          con.close()
+          print(n)
+          " 2>/dev/null || echo "?")
+          TAG="football-latest"
+          # Guard MONOTONICO: nunca clobberar o Release com um DB MENOR. Um seed falho
+          # ou merge parcial ja cratou 41k -> 5k eventos. So publica se EVENTS >= atual.
+          if [ "${EVENTS:-0}" = "?" ]; then EVENTS=0; fi
+          mkdir -p /tmp/curr
+          gh release download "$TAG" --repo ${{ github.repository }} \
+            --pattern "football_history_full.db" --dir /tmp/curr 2>/dev/null || true
+          CUR=$(python3 -c "
+          import sqlite3
+          try:
+              c = sqlite3.connect('/tmp/curr/football_history_full.db')
+              print(c.execute('SELECT COUNT(*) FROM events').fetchone()[0]); c.close()
+          except Exception:
+              print(0)
+          " 2>/dev/null || echo 0)
+          if [ "${EVENTS:-0}" -lt "${CUR:-0}" ]; then
+            echo "GUARD MONOTONICO: DB novo ($EVENTS ev) < Release atual ($CUR ev) — NAO publicando (evita crater)."
+            exit 0
+          fi
+          echo "Guard OK: novo=$EVENTS >= atual=$CUR — publicando."
+          NOTES="DB gerado em $(date -u '+%Y-%m-%d %H:%M UTC') | $EVENTS eventos | $SZ"
+          # Cria ou atualiza o release latest
+          gh release view "$TAG" --repo ${{ github.repository }} 2>/dev/null \
+            && gh release edit "$TAG" \
+                --repo ${{ github.repository }} \
+                --notes "$NOTES" \
+            || gh release create "$TAG" \
+                --repo ${{ github.repository }} \
+                --title "Football History DB (football-latest)" \
+                --notes "$NOTES" \
+                --prerelease
+          # Faz upload do DB (substitui se ja existir)
+          gh release upload "$TAG" football_history_full.db \
+            --repo ${{ github.repository }} \
+            --clobber
+          echo "Release football-latest atualizado: $EVENTS eventos, $SZ"
+
+  # ---------------------------------------------------------------------------
+  # 4) Continue: re-dispara o workflow se houver ligas incompletas
+  # ---------------------------------------------------------------------------
+  continue:
+    needs: merge
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar se ha ligas incompletas e re-disparar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Verificando completude da run ${{ github.run_id }}..."
+
+          # Conta shards com timeout ou falha
+          TIMED_OUT=$(gh run view ${{ github.run_id }} \
+            --repo ${{ github.repository }} \
+            --json jobs \
+            --jq '[.jobs[] | select(.name | test("scrape \\(")) | select(.conclusion == "timed_out" or .conclusion == "failure")] | length')
+
+          # Verifica se o quality gate encontrou incompletos
+          INCOMPLETE_COUNT=0
+          gh run download ${{ github.run_id }} \
+            --repo ${{ github.repository }} \
+            --name incomplete-leagues \
+            --dir /tmp/manifest/ 2>/dev/null || true
+          if [ -f /tmp/manifest/incomplete_leagues.json ]; then
+            INCOMPLETE_COUNT=$(python3 -c "import json; print(len(json.load(open('/tmp/manifest/incomplete_leagues.json'))))")
+          fi
+
+          echo "Shards com timeout/falha: $TIMED_OUT"
+          echo "Ligas incompletas: $INCOMPLETE_COUNT"
+
+          # FIX: usa o input 'attempt' que persiste entre runs (run_attempt reseta para 1 em cada novo dispatch)
+          ATTEMPT=${{ github.event.inputs.attempt || '1' }}
+          MAX_ATTEMPTS=20
+
+          if [ "$TIMED_OUT" -gt "0" ] || [ "$INCOMPLETE_COUNT" -gt "0" ]; then
+            if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+              echo "Atingido limite de $MAX_ATTEMPTS tentativas automaticas. Parando."
+              exit 0
+            fi
+            # CORRENTE UNICA: so dispara a proxima se NAO houver outra onda ativa.
+            # Sem isso, multiplas chains (continue + dispatches) acumulam 40+ shards
+            # disputando os 20 slots da conta -> a 2a onda espera ~6h na fila.
+            # Uma de cada vez = arranca na hora, cadencia limpa de ~6h.
+            ACTIVE=$(gh run list \
+              --workflow football-scrape.yml \
+              --repo ${{ github.repository }} \
+              --json status,databaseId \
+              --jq "[.[] | select((.status==\"in_progress\" or .status==\"queued\") and (.databaseId != ${{ github.run_id }}))] | length")
+            if [ "${ACTIVE:-0}" -gt "0" ]; then
+              echo "Ja existe $ACTIVE onda(s) ativa(s) — NAO disparando outra (mantem corrente unica, sem fila)."
+              exit 0
+            fi
+            NEXT_ATTEMPT=$((ATTEMPT + 1))
+            echo "Re-disparando workflow (tentativa $NEXT_ATTEMPT de $MAX_ATTEMPTS)..."
+            gh workflow run football-scrape.yml \
+              --repo ${{ github.repository }} \
+              --ref ${{ github.ref_name }} \
+              --field attempt="$NEXT_ATTEMPT"
+          else
+            echo "Todos os dados completos! Nenhuma re-execucao necessaria."
+          fi
