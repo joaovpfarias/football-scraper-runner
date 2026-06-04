@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS events (
     score_home    INTEGER,
     score_away    INTEGER,
     sets_detail   TEXT    DEFAULT '',
+    score_home_ht INTEGER,
+    score_away_ht INTEGER,
     status        TEXT    DEFAULT 'scheduled',
     venue         TEXT    DEFAULT '',
     venue_city    TEXT    DEFAULT '',
@@ -184,13 +186,18 @@ class SQLiteWriter:
         status = row.get("status", "scheduled")
 
         sets_detail = row.get("sets_detail", "") or ""
+        sh_ht = row.get("score_home_ht")
+        sa_ht = row.get("score_away_ht")
+        sh_ht_val = int(sh_ht) if sh_ht not in ("", None) else None
+        sa_ht_val = int(sa_ht) if sa_ht not in ("", None) else None
         self._con.execute(
             """INSERT OR IGNORE INTO events
                (id, league_id, season, home_id, away_id,
                 dt_utc, dt_local, score_home, score_away, sets_detail, status,
+                score_home_ht, score_away_ht,
                 venue, venue_city, venue_country, venue_lat, venue_lon,
                 source_url, scraped_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 row["event_id"], league_id,
                 row.get("season", ""),
@@ -198,6 +205,7 @@ class SQLiteWriter:
                 row.get("event_datetime_utc", ""),
                 row.get("event_datetime_local", ""),
                 sh_val, sa_val, sets_detail, status,
+                sh_ht_val, sa_ht_val,
                 row.get("venue", ""),
                 row.get("venue_city", ""),
                 row.get("venue_country", ""),

@@ -14,6 +14,19 @@ from bs4 import BeautifulSoup
 from ..normalizer import normalize_team_name, parse_pt_datetime
 
 
+def _parse_partials(paren_text: str) -> tuple:
+    """
+    Extrai score_home_ht, score_away_ht do primeiro grupo parentetico.
+    Ex: "(2:0, 3:0)" -> (2, 0)  [1o tempo]
+        "(6:7, 7:6, 6:2)" -> (6, 7)  [1o set no tenis]
+    Retorna ("", "") se nao encontrar.
+    """
+    sets = re.findall(r'(\d+)\s*[:\-]\s*(\d+)', paren_text)
+    if sets:
+        return int(sets[0][0]), int(sets[0][1])
+    return "", ""
+
+
 def parse(html: str) -> dict:
     soup = BeautifulSoup(html, "lxml")
 
@@ -28,7 +41,7 @@ def parse(html: str) -> dict:
         bc = soup.select_one('[data-testid="breadcrumb-current-page"]')
         if bc:
             txt = bc.get_text(" ", strip=True)
-            for sep in [" - ", " \u2013 ", " vs ", " v "]:
+            for sep in [" - ", " – ", " vs ", " v "]:
                 if sep in txt:
                     parts = txt.split(sep, 1)
                     home = normalize_team_name(parts[0])
@@ -42,11 +55,12 @@ def parse(html: str) -> dict:
         iso = parse_pt_datetime(gt.get_text(" ", strip=True)) or ""
 
     score_home, score_away, status, sets_detail = "", "", "scheduled", ""
+    score_home_ht, score_away_ht = "", ""
 
     # Placar via live-info: "Resultado final <strong>2:1</strong> (sets detail)"
     li = soup.select_one('[data-testid="live-info"]')
     if li:
-        # Sets vencidos: extrai do <strong>
+        # Score final: extrai do <strong>
         strong = li.find("strong")
         if strong:
             score_txt = strong.get_text(strip=True)
@@ -59,18 +73,23 @@ def parse(html: str) -> dict:
                 except ValueError:
                     pass
 
-        # Sets detalhados: "(6:7, 7:6, 6:2)" \u2014 remove superscripts (tiebreak pts) antes
+        # Parciais: "(6:7, 7:6, 6:2)" ou "(2:0, 3:0)" — remove superscripts antes
         li_copy = BeautifulSoup(str(li), "lxml")
         for sup in li_copy.find_all("sup"):
             sup.decompose()
         li_text = li_copy.get_text(" ", strip=True)
         paren = re.search(r'\(([^)]+)\)', li_text)
         if paren and status == "finished":
-            # Normaliza: "6:7, 7:6, 6:2" -> "6-7 7-6 6-2"
             raw = paren.group(1)
             sets = re.findall(r'(\d+)\s*[:\-]\s*(\d+)', raw)
             if sets:
                 sets_detail = " ".join(f"{a}-{b}" for a, b in sets)
+                # 1o parcial = 1o tempo (futebol) ou 1o set (tenis)
+                try:
+                    score_home_ht = int(sets[0][0])
+                    score_away_ht = int(sets[0][1])
+                except (ValueError, IndexError):
+                    pass
 
         # Fallback: texto livre sem <strong> (outros esportes)
         if status == "scheduled":
@@ -88,7 +107,7 @@ def parse(html: str) -> dict:
         gp = soup.select_one('[data-testid="game-participants"]')
         if gp:
             txt = gp.get_text(" ", strip=True)
-            m = re.search(r'(\d+)\s*[\u2013\u2014\-]\s*(\d+)', txt)
+            m = re.search(r'(\d+)\s*[–—\-]\s*(\d+)', txt)
             if m:
                 try:
                     score_home = int(m.group(1))
@@ -104,8 +123,10 @@ def parse(html: str) -> dict:
         "venue": "",
         "venue_city": "",
         "venue_country": "",
-        "score_home": score_home,
-        "score_away": score_away,
-        "sets_detail": sets_detail,
-        "status": status,
+        "score_home":    score_home,
+        "score_away":    score_away,
+        "score_home_ht": score_home_ht,
+        "score_away_ht": score_away_ht,
+        "sets_detail":   sets_detail,   # raw parciais: "2-0 3-0" (futebol) ou "6-7 7-6 6-2" (tenis)
+        "status":        status,
     }
