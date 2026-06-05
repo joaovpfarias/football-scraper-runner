@@ -64,70 +64,50 @@ def merge_shard(main: sqlite3.Connection, shard_path: str) -> dict:
     # 2) Leagues (FK pra sports)
     leagues_map = _build_leagues_mapping(main, src, maps["sports"])
 
-    # 3) Events — schema v2 (futebol): partials + score_home_ht/away_ht + score_home_2h/away_2h
+    # 3) Events — suporta DBs antigos sem sets_detail
     # Upsert: evento com score vence sobre evento sem score (seed com historico ganha)
-    # Lida com shards antigos sem as colunas extras via _has_column
-    def _col(name, alias=None):
-        return f", {name}" if _has_column(src, "events", name) else ""
+    has_sets = _has_column(src, "events", "sets_detail")
+    sets_col = ", sets_detail" if has_sets else ""
     ev_inserted = 0
-    col_partials   = _col("partials")
-    col_sh_ht      = _col("score_home_ht")
-    col_sa_ht      = _col("score_away_ht")
-    col_sh_2h      = _col("score_home_2h")
-    col_sa_2h      = _col("score_away_2h")
     for row in src.execute(f"""
         SELECT id, league_id, season, home_id, away_id, dt_utc, dt_local,
-               score_home, score_away{col_partials}, status,
-               venue, venue_city, venue_country, venue_lat, venue_lon, source_url, scraped_at
-               {col_sh_ht}{col_sa_ht}{col_sh_2h}{col_sa_2h}
+               score_home, score_away{sets_col}, status, venue, venue_city, venue_country,
+               venue_lat, venue_lon, source_url, scraped_at
         FROM events
     """):
         new_league = leagues_map.get(row[1])
-        new_home   = maps["teams"].get(row[3])
-        new_away   = maps["teams"].get(row[4])
+        new_home = maps["teams"].get(row[3])
+        new_away = maps["teams"].get(row[4])
         if new_league is None or new_home is None or new_away is None:
             continue
-        r = dict(zip(
-            ["id","league_id","season","home_id","away_id","dt_utc","dt_local",
-             "score_home","score_away","partials","status",
-             "venue","venue_city","venue_country","venue_lat","venue_lon","source_url","scraped_at",
-             "score_home_ht","score_away_ht","score_home_2h","score_away_2h"],
-            list(row) + [None]*(22 - len(row))
-        ))
-        vals = (
-            r["id"], new_league, r["season"], new_home, new_away,
-            r["dt_utc"], r["dt_local"], r["score_home"], r["score_away"],
-            r["partials"] or "", r["status"],
-            r["score_home_ht"], r["score_away_ht"],
-            r["score_home_2h"], r["score_away_2h"],
-            r["venue"], r["venue_city"], r["venue_country"],
-            r["venue_lat"], r["venue_lon"], r["source_url"], r["scraped_at"],
-        )
+        if has_sets:
+            vals = (row[0], new_league, row[2], new_home, new_away,
+                    row[5], row[6], row[7], row[8], row[9], row[10],
+                    row[11], row[12], row[13], row[14], row[15], row[16], row[17])
+        else:
+            vals = (row[0], new_league, row[2], new_home, new_away,
+                    row[5], row[6], row[7], row[8], "", row[9],
+                    row[10], row[11], row[12], row[13], row[14], row[15], row[16])
         cur = main.execute("""
             INSERT INTO events(
                 id, league_id, season, home_id, away_id, dt_utc, dt_local,
-                score_home, score_away, partials, status,
-                score_home_ht, score_away_ht, score_home_2h, score_away_2h,
+                score_home, score_away, sets_detail, status,
                 venue, venue_city, venue_country, venue_lat, venue_lon,
                 source_url, scraped_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
-                score_home    = CASE WHEN events.score_home IS NULL AND excluded.score_home IS NOT NULL
-                                     THEN excluded.score_home ELSE events.score_home END,
-                score_away    = CASE WHEN events.score_home IS NULL AND excluded.score_away IS NOT NULL
-                                     THEN excluded.score_away ELSE events.score_away END,
-                score_home_ht = CASE WHEN events.score_home_ht IS NULL AND excluded.score_home_ht IS NOT NULL
-                                     THEN excluded.score_home_ht ELSE events.score_home_ht END,
-                score_away_ht = CASE WHEN events.score_away_ht IS NULL AND excluded.score_away_ht IS NOT NULL
-                                     THEN excluded.score_away_ht ELSE events.score_away_ht END,
-                score_home_2h = CASE WHEN events.score_home_2h IS NULL AND excluded.score_home_2h IS NOT NULL
-                                     THEN excluded.score_home_2h ELSE events.score_home_2h END,
-                score_away_2h = CASE WHEN events.score_away_2h IS NULL AND excluded.score_away_2h IS NOT NULL
-                                     THEN excluded.score_away_2h ELSE events.score_away_2h END,
-                partials      = CASE WHEN (events.partials IS NULL OR events.partials = "") AND excluded.partials != ""
-                                     THEN excluded.partials ELSE events.partials END,
-                status        = CASE WHEN events.status != "finished" AND excluded.status = "finished"
-                                     THEN excluded.status ELSE events.status END
+                score_home  = CASE WHEN events.score_home IS NULL OR events.score_home = ''
+                                        AND (excluded.score_home IS NOT NULL AND excluded.score_home != '')
+                                   THEN excluded.score_home ELSE events.score_home END,
+                score_away  = CASE WHEN events.score_home IS NULL OR events.score_home = ''
+                                        AND (excluded.score_away IS NOT NULL AND excluded.score_away != '')
+                                   THEN excluded.score_away ELSE events.score_away END,
+                sets_detail = CASE WHEN (events.score_home IS NULL OR events.score_home = '')
+                                        AND excluded.sets_detail != ''
+                                   THEN excluded.sets_detail ELSE events.sets_detail END,
+                status      = CASE WHEN (events.score_home IS NULL OR events.score_home = '')
+                                        AND excluded.status = 'finished'
+                                   THEN excluded.status ELSE events.status END
         """, vals)
         ev_inserted += cur.rowcount
 
@@ -244,6 +224,12 @@ def main():
     final = {}
     for t in ("events", "odds", "leagues", "teams", "bookmakers"):
         final[t] = main_con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+    if _has_table(main_con, "season_state"):
+        final["seasons_cached"] = main_con.execute("SELECT COUNT(*) FROM season_state").fetchone()[0]
+        final["seasons_empty"]  = main_con.execute("SELECT COUNT(*) FROM season_state WHERE n_matches=0").fetchone()[0]
+    else:
+        final["seasons_cached"] = 0
+        final["seasons_empty"]  = 0
     main_con.execute("PRAGMA optimize")
     main_con.close()
 
@@ -253,6 +239,7 @@ def main():
     print(f"  Odds:       {final['odds']}")
     print(f"  Torneios:   {final['leagues']}")
     print(f"  Bookmakers: {final['bookmakers']}")
+    print(f"  Seasons cacheadas: {final['seasons_cached']} ({final['seasons_empty']} vazias)")
 
 
 if __name__ == "__main__":
