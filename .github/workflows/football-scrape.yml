@@ -58,7 +58,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0,1,2,3,4,5,6,7,8,9]
+        include:
+          - {shard: 0}
+          - {shard: 1}
+          - {shard: 2}
+          - {shard: 3}
+          - {shard: 4}
+          - {shard: 5}
+          - {shard: 6}
+          - {shard: 7, priority_invert: "1"}
+          - {shard: 8, priority_invert: "1"}
+          - {shard: 9, priority_invert: "1"}
     steps:
       - uses: actions/checkout@v4
 
@@ -132,6 +142,7 @@ jobs:
           SHARD_ID: ${{ matrix.shard }}
           TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
           DB_PATH_OVERRIDE: ${{ github.workspace }}/shard-${{ matrix.shard }}.db
+          PRIORITY_INVERT: ${{ matrix.priority_invert || '0' }}
         run: python astrology/scrapers/oddsportal/scrape_football_history.py
 
       - name: Checkpoint WAL (garante dados no .db antes do upload)
