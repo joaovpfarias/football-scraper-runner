@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 # Sharding (GitHub Actions matrix): SHARD_ID/TOTAL_SHARDS dividem a lista de torneios.
 SHARD_ID      = int(os.environ.get("SHARD_ID", "0"))
 TOTAL_SHARDS  = int(os.environ.get("TOTAL_SHARDS", "1"))
-DISCOVER_ONLY = os.environ.get("DISCOVER_ONLY", "0") == "1"
+DISCOVER_ONLY    = os.environ.get("DISCOVER_ONLY", "0") == "1"
+PRIORITY_INVERT = os.environ.get("PRIORITY_INVERT", "0") == "1"  # shards 7-9: ITF-first
 DB_PATH       = os.environ.get("DB_PATH_OVERRIDE") or str(Path(__file__).parent / "data" / "raw" / "football_history.db")
 BASE_URL      = "https://www.oddsagora.com.br"
 SPORT_KEY     = "soccer"
@@ -84,8 +85,8 @@ PARALLEL_LEAGUES  = 1   # 1 torneio por vez (evita travar a maquina)
 # 12->24: onda 26950452680 confirmou zero OOM com 12 (todos cancelled, nenhum failed).
 # 24x~150MB=3.6GB browser + 1GB overhead = ~4.6GB de 7GB. IO-bound: +paginas = +throughput.
 # Se OOM (conclusion=failed), voltar p/ 12.
-PARALLEL_MATCHES  = 24  # matches em paralelo (usa todas as paginas do pool)
-BROWSER_POOL      = 24  # paginas Chromium no pool
+PARALLEL_MATCHES  = 28  # matches em paralelo (usa todas as paginas do pool)
+BROWSER_POOL      = 28  # paginas Chromium no pool
 USE_CACHE         = True
 PAGE_FULL         = 40  # se a pg1 trouxe >= isso, provavelmente ha mais paginas
 MAX_RESULT_PAGES  = 25  # teto de paginas de resultado por season
@@ -667,7 +668,7 @@ async def main():
         # PRIORITY-FIRST: reordena dentro do shard por tier (Grand Slams primeiro).
         # Garante que mesmo se o shard expirar no timeout, os torneios mais importantes
         # ja foram processados. Dentro de cada tier, ordena alfabeticamente.
-        all_leagues.sort(key=lambda p: (_league_tier(p), p))
+        all_leagues.sort(key=lambda p: (_league_tier(p), p), reverse=PRIORITY_INVERT)
         tier_counts = {}
         for lg in all_leagues:
             t = _league_tier(lg)
