@@ -94,7 +94,13 @@ class OddsPortalBrowser:
     async def __aenter__(self):
         self._pw = await async_playwright().start()
         proxy = os.environ.get("ODDSPORTAL_PROXY")
-        launch_args = {"headless": not self.headful}
+        launch_args = {
+            "headless": not self.headful,
+            # --disable-dev-shm-usage: /dev/shm no ubuntu-latest tem ~metade da RAM;
+            # com 28+ renderers simultaneos pode saturar e causar crashes silenciosos.
+            # Esta flag faz o Chromium usar /tmp em vez de /dev/shm sem custo de perf.
+            "args": ["--disable-dev-shm-usage"],
+        }
         if proxy:
             launch_args["proxy"] = {"server": proxy}
         self._browser = await self._pw.chromium.launch(**launch_args)
