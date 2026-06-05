@@ -38,6 +38,7 @@ SHARD_ID      = int(os.environ.get("SHARD_ID", "0"))
 TOTAL_SHARDS  = int(os.environ.get("TOTAL_SHARDS", "1"))
 DISCOVER_ONLY    = os.environ.get("DISCOVER_ONLY", "0") == "1"
 PRIORITY_INVERT = os.environ.get("PRIORITY_INVERT", "0") == "1"  # shards 7-9: ITF-first
+DEBUG_LEAGUES   = os.environ.get("DEBUG_LEAGUES", "0") == "1"   # roda apenas 5 ligas tier 0/1 localmente
 DB_PATH       = os.environ.get("DB_PATH_OVERRIDE") or str(Path(__file__).parent / "data" / "raw" / "football_history.db")
 BASE_URL      = "https://www.oddsagora.com.br"
 SPORT_KEY     = "soccer"
@@ -512,13 +513,18 @@ async def _process_match(
 
 async def scrape_league(
     br: OddsPortalBrowser, league_path: str, writer: SQLiteWriter,
-    league_sem: asyncio.Semaphore,
+    league_sem: asyncio.Semaphore, idx: int = 0, total: int = 0,
 ):
     async with league_sem:
         match_sem = asyncio.Semaphore(PARALLEL_MATCHES)
         tier = _league_tier(league_path)
+        _matches_total = 0
+        _empty_seasons = 0
+        _skipped_cache = 0
+        _skipped_complete = 0
+        prefix = f"[{idx}/{total}] " if idx else ""
         print(f"\n{'='*55}")
-        print(f"Torneio: {league_path}  [tier={tier}]")
+        print(f"{prefix}Torneio: {league_path}  [tier={tier}]")
         print(f"{'='*55}")
 
         for suffix in SEASON_SUFFIXES:
@@ -530,6 +536,7 @@ async def scrape_league(
             # pela fila para alcancar os tiers profundos (ITF).
             if _season_is_final(suffix) and writer.is_season_complete(league_path, season_str):
                 print(f"  [skip-cache] {league_path} season={season_str} ja completa (onda anterior)")
+                _skipped_cache += 1
                 continue
 
             results_url = url_builder.build_results_url(SPORT_SLUG, league_path, suffix)
@@ -583,6 +590,7 @@ async def scrape_league(
 
             if not all_matches:
                 print(f"  [vazio] sem matches em {results_url}")
+                _empty_seasons += 1
                 # SEM early-stop: mapeamos TODOS os anos possiveis (completude).
                 # A eficiencia vem do CACHE: marca a season passada vazia como completa
                 # para nenhuma onda futura re-buscar esse ano. Assim a 1a onda mapeia o
@@ -596,12 +604,14 @@ async def scrape_league(
             matches_to_process = [m for m in all_matches if m["match_url"] not in done_urls]
             if not matches_to_process:
                 print(f"  [skip] {league_path} season={season_str or 'atual'} — todos {len(all_matches)} ja completos")
+                _skipped_complete += 1
                 # Season passada totalmente coberta -> grava no cache p/ pular antes da listagem na proxima onda
                 if _season_is_final(suffix):
                     writer.mark_season_complete(league_path, season_str, len(all_matches))
                 continue
 
             print(f"  {len(matches_to_process)}/{len(all_matches)} jogos a raspar (season '{season_str or 'atual'}')")
+            _matches_total += len(matches_to_process)
             tasks = [
                 _process_match(br, m, league_path, season_str, writer, match_sem, i, len(matches_to_process))
                 for i, m in enumerate(matches_to_process, 1)
@@ -627,6 +637,13 @@ async def scrape_league(
                 for i, ev in enumerate(incomplete, 1)
             ]
             await asyncio.gather(*bf_tasks, return_exceptions=True)
+        return {
+            "league": league_path,
+            "matches_total": _matches_total,
+            "empty_seasons": _empty_seasons,
+            "skipped_cache": _skipped_cache,
+            "skipped_complete": _skipped_complete,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +686,9 @@ async def main():
         # Garante que mesmo se o shard expirar no timeout, os torneios mais importantes
         # ja foram processados. Dentro de cada tier, ordena alfabeticamente.
         all_leagues.sort(key=lambda p: (_league_tier(p), p), reverse=PRIORITY_INVERT)
+        if DEBUG_LEAGUES:
+            all_leagues = [lg for lg in all_leagues if _league_tier(lg) <= 1][:5]
+            print(f"[DEBUG] Modo local — apenas {len(all_leagues)} ligas tier 0/1: {all_leagues}")
         tier_counts = {}
         for lg in all_leagues:
             t = _league_tier(lg)
@@ -686,8 +706,15 @@ async def main():
 
         # --- Fase 2: scraping de todos os torneios ---
         league_sem = asyncio.Semaphore(PARALLEL_LEAGUES)
-        tasks = [scrape_league(br, lg, writer, league_sem) for lg in all_leagues]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [
+            scrape_league(br, lg, writer, league_sem, idx, len(all_leagues))
+            for idx, lg in enumerate(all_leagues, 1)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        leagues_with_data     = sum(1 for r in results if isinstance(r, dict) and r.get("matches_total", 0) > 0)
+        leagues_empty         = sum(1 for r in results if isinstance(r, dict) and r.get("matches_total", 0) == 0)
+        seasons_skipped_cache = sum(r.get("skipped_cache", 0) for r in results if isinstance(r, dict))
+        print(f"\n[resumo] Ligas com dados: {leagues_with_data} | Ligas vazias: {leagues_empty} | Seasons puladas por cache: {seasons_skipped_cache}")
 
     stats = writer.stats()
     writer.close()
