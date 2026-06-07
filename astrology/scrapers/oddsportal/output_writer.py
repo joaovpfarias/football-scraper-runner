@@ -314,8 +314,11 @@ class SQLiteWriter:
     def mark_season_complete(self, league_path: str, season: str, n_matches: int) -> None:
         """Marca a liga-season como totalmente raspada (so usar em seasons PASSADAS)."""
         self._con.execute(
-            """INSERT OR REPLACE INTO season_state(league_path, season, n_matches, completed_at)
-               VALUES (?,?,?,?)""",
+            """INSERT INTO season_state(league_path, season, n_matches, completed_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(league_path, season) DO UPDATE SET
+                 n_matches    = MAX(season_state.n_matches, excluded.n_matches),
+                 completed_at = excluded.completed_at""",
             (league_path, season, int(n_matches),
              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
         )
