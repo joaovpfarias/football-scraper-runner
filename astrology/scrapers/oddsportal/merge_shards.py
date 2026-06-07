@@ -64,14 +64,14 @@ def merge_shard(main: sqlite3.Connection, shard_path: str) -> dict:
     # 2) Leagues (FK pra sports)
     leagues_map = _build_leagues_mapping(main, src, maps["sports"])
 
-    # 3) Events — suporta DBs antigos sem sets_detail
+    # 3) Events — futebol: partials + scores por tempo
     # Upsert: evento com score vence sobre evento sem score (seed com historico ganha)
-    has_sets = _has_column(src, "events", "sets_detail")
-    sets_col = ", sets_detail" if has_sets else ""
+    has_partials = _has_column(src, "events", "partials")
+    partials_col = ", partials, score_home_ht, score_away_ht, score_home_2h, score_away_2h" if has_partials else ""
     ev_inserted = 0
     for row in src.execute(f"""
         SELECT id, league_id, season, home_id, away_id, dt_utc, dt_local,
-               score_home, score_away{sets_col}, status, venue, venue_city, venue_country,
+               score_home, score_away{partials_col}, status, venue, venue_city, venue_country,
                venue_lat, venue_lon, source_url, scraped_at
         FROM events
     """):
@@ -80,34 +80,47 @@ def merge_shard(main: sqlite3.Connection, shard_path: str) -> dict:
         new_away = maps["teams"].get(row[4])
         if new_league is None or new_home is None or new_away is None:
             continue
-        if has_sets:
+        if has_partials:
+            # SELECT returns 22 cols:
+            # 0=id,1=league_id,2=season,3=home_id,4=away_id,5=dt_utc,6=dt_local,
+            # 7=score_home,8=score_away,9=partials,10=sh_ht,11=sa_ht,12=sh_2h,13=sa_2h,
+            # 14=status,15=venue,16=venue_city,17=venue_country,18=lat,19=lon,20=source_url,21=scraped_at
             vals = (row[0], new_league, row[2], new_home, new_away,
-                    row[5], row[6], row[7], row[8], row[9], row[10],
-                    row[11], row[12], row[13], row[14], row[15], row[16], row[17])
+                    row[5], row[6], row[7], row[8], row[9], row[10], row[11], row[12], row[13],
+                    row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21])
         else:
+            # SELECT returns 17 cols (sem partials):
+            # 0=id,1=league_id,2=season,3=home_id,4=away_id,5=dt_utc,6=dt_local,
+            # 7=score_home,8=score_away,9=status,10=venue,11=venue_city,12=venue_country,
+            # 13=lat,14=lon,15=source_url,16=scraped_at
             vals = (row[0], new_league, row[2], new_home, new_away,
-                    row[5], row[6], row[7], row[8], "", row[9],
-                    row[10], row[11], row[12], row[13], row[14], row[15], row[16])
+                    row[5], row[6], row[7], row[8], "", None, None, None, None,
+                    row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16])
         cur = main.execute("""
             INSERT INTO events(
                 id, league_id, season, home_id, away_id, dt_utc, dt_local,
-                score_home, score_away, sets_detail, status,
-                venue, venue_city, venue_country, venue_lat, venue_lon,
+                score_home, score_away, partials,
+                score_home_ht, score_away_ht, score_home_2h, score_away_2h,
+                status, venue, venue_city, venue_country, venue_lat, venue_lon,
                 source_url, scraped_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
-                score_home  = CASE WHEN events.score_home IS NULL OR events.score_home = ''
-                                        AND (excluded.score_home IS NOT NULL AND excluded.score_home != '')
-                                   THEN excluded.score_home ELSE events.score_home END,
-                score_away  = CASE WHEN events.score_home IS NULL OR events.score_home = ''
-                                        AND (excluded.score_away IS NOT NULL AND excluded.score_away != '')
-                                   THEN excluded.score_away ELSE events.score_away END,
-                sets_detail = CASE WHEN (events.score_home IS NULL OR events.score_home = '')
-                                        AND excluded.sets_detail != ''
-                                   THEN excluded.sets_detail ELSE events.sets_detail END,
-                status      = CASE WHEN (events.score_home IS NULL OR events.score_home = '')
-                                        AND excluded.status = 'finished'
-                                   THEN excluded.status ELSE events.status END
+                score_home    = CASE WHEN events.score_home IS NULL AND excluded.score_home IS NOT NULL
+                                     THEN excluded.score_home ELSE events.score_home END,
+                score_away    = CASE WHEN events.score_home IS NULL AND excluded.score_away IS NOT NULL
+                                     THEN excluded.score_away ELSE events.score_away END,
+                partials      = CASE WHEN events.partials = '' AND excluded.partials != ''
+                                     THEN excluded.partials ELSE events.partials END,
+                score_home_ht = CASE WHEN events.score_home_ht IS NULL AND excluded.score_home_ht IS NOT NULL
+                                     THEN excluded.score_home_ht ELSE events.score_home_ht END,
+                score_away_ht = CASE WHEN events.score_away_ht IS NULL AND excluded.score_away_ht IS NOT NULL
+                                     THEN excluded.score_away_ht ELSE events.score_away_ht END,
+                score_home_2h = CASE WHEN events.score_home_2h IS NULL AND excluded.score_home_2h IS NOT NULL
+                                     THEN excluded.score_home_2h ELSE events.score_home_2h END,
+                score_away_2h = CASE WHEN events.score_away_2h IS NULL AND excluded.score_away_2h IS NOT NULL
+                                     THEN excluded.score_away_2h ELSE events.score_away_2h END,
+                status        = CASE WHEN events.score_home IS NULL AND excluded.status = 'finished'
+                                     THEN excluded.status ELSE events.status END
         """, vals)
         ev_inserted += cur.rowcount
 
@@ -206,7 +219,7 @@ def main():
         print(f"[merge] {skipped} shard(s) pulados (vazios ou corrompidos)")
 
     # Auto-cura do bug falsy-0: evento 'finished' com EXATAMENTE um lado NULL teve
-    # o 0 do perdedor (sets diretos) apagado pelo `or`. O unico int falsy e 0, entao
+    # o 0 do perdedor (scores diretos) apagado pelo `or`. O unico int falsy e 0, entao
     # o lado faltante e definitivamente 0. Conserta resíduo de DBs/shards antigos.
     r1 = main_con.execute(
         "UPDATE events SET score_home=0 "
@@ -219,6 +232,30 @@ def main():
     main_con.commit()
     if r1 or r2:
         print(f"[fix falsy-0] placar do perdedor (0) restaurado: {r1 + r2} eventos")
+
+    # Achado 4: infere season do dt_utc para eventos coletados via feed atual (season='')
+    r_season = main_con.execute(
+        "UPDATE events SET season = substr(dt_utc, 1, 4) "
+        "WHERE season = '' AND dt_utc != '' AND length(dt_utc) >= 4"
+    ).rowcount
+    main_con.commit()
+    if r_season:
+        print(f"[fix season] {r_season} eventos tiveram season inferido do dt_utc")
+
+    # Achado 2: Targeted DELETE remove false-empty entries onde events existem
+    r_del = main_con.execute("""
+        DELETE FROM season_state
+        WHERE n_matches = 0
+        AND EXISTS (
+            SELECT 1 FROM events e
+            JOIN leagues l ON e.league_id = l.id
+            WHERE l.path = season_state.league_path
+            AND e.season = season_state.season
+        )
+    """).rowcount
+    main_con.commit()
+    if r_del:
+        print(f"[fix season_state] {r_del} entradas false-empty removidas (eventos existem para essa liga+season)")
 
     # Stats finais
     final = {}
