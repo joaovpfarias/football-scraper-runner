@@ -377,6 +377,20 @@ def _scraped_urls(db_path: str, league_path: str, season: str) -> set:
         return set()
 
 
+def _scraped_urls_count(db_path: str, league_path: str, season: str) -> int:
+    """Conta eventos existentes para liga+season (Achado 2: guard para false-empty)."""
+    try:
+        con = sqlite3.connect(db_path)
+        row = con.execute(
+            "SELECT COUNT(*) FROM events e JOIN leagues l ON e.league_id=l.id WHERE l.path=? AND e.season=?",
+            (league_path, season)
+        ).fetchone()
+        con.close()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+
 def _league_incomplete_events(db_path: str, league_path: str) -> list[dict]:
     """
     Retorna eventos da liga que estao no DB sem score OU sem home_away odds.
@@ -596,7 +610,13 @@ async def scrape_league(
                 # para nenhuma onda futura re-buscar esse ano. Assim a 1a onda mapeia o
                 # torneio inteiro (cheio + vazio) e as proximas pulam tudo (so feed atual).
                 if _season_is_final(suffix):
-                    writer.mark_season_complete(league_path, season_str, 0)
+                    # Achado 2 guard: so marca como vazio se nao houver eventos ja gravados para esse ano.
+                    # Evita cachear como "nunca existiu" uma season que foi coletada via feed atual.
+                    existing_count = _scraped_urls_count(str(writer.path), league_path, season_str)
+                    if existing_count == 0:
+                        writer.mark_season_complete(league_path, season_str, 0)
+                    else:
+                        print(f"  [skip-empty-guard] {league_path}/{season_str} tem {existing_count} eventos no DB — nao cacheia como vazio")
                 continue
 
             # Checkpoint por jogo: pula apenas os ja completos (score + home_away odds)
