@@ -580,7 +580,9 @@ async def scrape_league(
             # Avanca paginas ate 3 seguidas sem match novo. So pagina se a pg1
             # veio "cheia" (>= PAGE_FULL): torneios pequenos cabem numa pagina.
             seen_urls = {m["match_url"] for m in all_matches}
+            _pag_ok = True
             if len(all_matches) >= PAGE_FULL:
+                _pag_ok = False
                 no_new = 0
                 pg = 2
                 while pg <= MAX_RESULT_PAGES:
@@ -599,8 +601,11 @@ async def scrape_league(
                     else:
                         no_new += 1
                         if no_new >= 3:
+                            _pag_ok = True
                             break
                     pg += 1
+                else:
+                    _pag_ok = True
 
             if not all_matches:
                 print(f"  [vazio] sem matches em {results_url}")
@@ -626,7 +631,7 @@ async def scrape_league(
                 print(f"  [skip] {league_path} season={season_str or 'atual'} — todos {len(all_matches)} ja completos")
                 _skipped_complete += 1
                 # Season passada totalmente coberta -> grava no cache p/ pular antes da listagem na proxima onda
-                if _season_is_final(suffix):
+                if _season_is_final(suffix) and _pag_ok:
                     writer.mark_season_complete(league_path, season_str, len(all_matches))
                 continue
 
@@ -640,7 +645,7 @@ async def scrape_league(
             # Pass completa numa season PASSADA: o conjunto de jogos do torneio finalizado
             # nao muda mais; marca no cache para nao re-rastejar a listagem nas proximas ondas.
             # (jogos sem odds no site permanecem sem odds — re-tentar e desperdicio que trava o avanco)
-            if _season_is_final(suffix):
+            if _season_is_final(suffix) and _pag_ok:
                 writer.mark_season_complete(league_path, season_str, len(all_matches))
 
         # Backfill: re-raspa eventos sem score OU sem home_away odds.

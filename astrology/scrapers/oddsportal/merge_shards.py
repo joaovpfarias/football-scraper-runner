@@ -152,8 +152,11 @@ def merge_shard(main: sqlite3.Connection, shard_path: str) -> dict:
             "SELECT league_path, season, n_matches, completed_at FROM season_state"
         ):
             main.execute(
-                """INSERT OR IGNORE INTO season_state(league_path, season, n_matches, completed_at)
-                   VALUES (?,?,?,?)""",
+                """INSERT INTO season_state(league_path, season, n_matches, completed_at)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(league_path, season) DO UPDATE SET
+                     n_matches    = MAX(season_state.n_matches, excluded.n_matches),
+                     completed_at = excluded.completed_at""",
                 row,
             )
 
