@@ -1,4 +1,4 @@
-# Script: historico completo de tenis do oddsagora.com.br
+# Script: historico completo de futebol do oddsagora.com.br
 # Rodar: C:\Users\Dell\anaconda3\python.exe astrology\scrapers\oddsportal\scrape_football_history.py
 # Saida:  astrology/scrapers/oddsportal/data/raw/football_history.db
 #
@@ -310,7 +310,7 @@ async def discover_leagues(br: OddsPortalBrowser) -> list[str]:
             slugs.update(new)
             after = len(slugs)
 
-            # Verifica se ha algum conteudo util na pagina (game-rows OU links de tenis)
+            # Verifica se ha algum conteudo util na pagina (game-rows OU links de futebol)
             matches = results_listing.parse(html)
             has_content = bool(matches) or bool(new)
             if not has_content:
@@ -677,7 +677,7 @@ async def scrape_league(
 
 async def main():
     print("=" * 60)
-    print("Tennis Full History Scraper")
+    print("Football Full History Scraper")
     print(f"Output: {DB_PATH}")
     print(f"Paralelo: {PARALLEL_LEAGUES} torneios x {PARALLEL_MATCHES} matches")
     print("=" * 60)
