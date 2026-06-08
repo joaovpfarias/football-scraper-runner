@@ -58,8 +58,12 @@ MARKETS       = [
 
 # Anos para tentar com sufixo de season - ordem REVERSA (mais recente primeiro)
 # Combinado com early-stop: torneios discontinuados nao gastam 16 fetches.
-SEASON_YEARS  = list(range(2026, 1997, -1))   # 2026, 2025, ..., 1998 (early-stop automatico)
+SEASON_YEARS  = list(range(2026, 1997, -1))   # 2026, 2025, ..., 1998
 SEASON_SUFFIXES = [None] + [str(y) for y in SEASON_YEARS]
+
+EARLY_STOP_THRESHOLD = 3     # vazios consecutivos para disparar o probe
+PROBE_CUTOFF         = 2021  # só dispara se ainda estamos acima desse ano
+ANCHOR_YEARS         = [2020, 2019, 2018, 2017, 2016, 2015, 2014, 2013, 2012]
 
 _CUR_YEAR = datetime.now(timezone.utc).year
 
@@ -541,7 +545,11 @@ async def scrape_league(
         print(f"{prefix}Torneio: {league_path}  [tier={tier}]")
         print(f"{'='*55}")
 
-        for suffix in SEASON_SUFFIXES:
+        _consecutive_empty = 0
+        _sfx_idx = 0
+        while _sfx_idx < len(SEASON_SUFFIXES):
+            suffix = SEASON_SUFFIXES[_sfx_idx]
+            _sfx_idx += 1
             season_str = suffix or ""
 
             # Pre-listing skip (correcao B): seasons passadas ja raspadas por completo
@@ -610,11 +618,8 @@ async def scrape_league(
             if not all_matches:
                 print(f"  [vazio] sem matches em {results_url}")
                 _empty_seasons += 1
-                # SEM early-stop: mapeamos TODOS os anos possiveis (completude).
-                # A eficiencia vem do CACHE: marca a season passada vazia como completa
-                # para nenhuma onda futura re-buscar esse ano. Assim a 1a onda mapeia o
-                # torneio inteiro (cheio + vazio) e as proximas pulam tudo (so feed atual).
                 if _season_is_final(suffix):
+                    _consecutive_empty += 1
                     # Achado 2 guard: so marca como vazio se nao houver eventos ja gravados para esse ano.
                     # Evita cachear como "nunca existiu" uma season que foi coletada via feed atual.
                     existing_count = _scraped_urls_count(str(writer.path), league_path, season_str)
@@ -622,8 +627,44 @@ async def scrape_league(
                         writer.mark_season_complete(league_path, season_str, 0)
                     else:
                         print(f"  [skip-empty-guard] {league_path}/{season_str} tem {existing_count} eventos no DB — nao cacheia como vazio")
+
+                    # Early-stop: apos EARLY_STOP_THRESHOLD vazios consecutivos acima de
+                    # PROBE_CUTOFF, verifica ancoras historicas para decidir se a liga esta
+                    # morta ou tem dados so em anos antigos.
+                    if _consecutive_empty >= EARLY_STOP_THRESHOLD and int(suffix) > PROBE_CUTOFF:
+                        anchors_to_probe = [y for y in ANCHOR_YEARS if y < int(suffix)]
+                        found_anchor = None
+                        for anchor_year in anchors_to_probe:
+                            probe_url = url_builder.build_results_url(SPORT_SLUG, league_path, str(anchor_year))
+                            try:
+                                probe_html = await _fetch_cached(br, probe_url, wait_selector=DISCOVERY_WAIT_SELECTOR)
+                                probe_matches = results_listing.parse(probe_html)
+                                if not probe_matches:
+                                    probe_html = await _fetch_cached(br, probe_url,
+                                                                     wait_selector=DISCOVERY_WAIT_SELECTOR, force=True)
+                                    probe_matches = results_listing.parse(probe_html)
+                            except Exception:
+                                probe_matches = []
+                            if probe_matches:
+                                found_anchor = anchor_year
+                                break
+
+                        if found_anchor is not None:
+                            print(f"  [early-stop-probe] {league_path}: dados em {found_anchor} — retomando iteracao normal")
+                            _consecutive_empty = 0
+                        else:
+                            # Liga morta: bulk-cache todos os sufixos restantes sem fetchá-los.
+                            remaining = SEASON_SUFFIXES[_sfx_idx:]
+                            n_cached = 0
+                            for rem in remaining:
+                                if rem and _season_is_final(rem):
+                                    writer.mark_season_complete(league_path, rem, 0)
+                                    n_cached += 1
+                            print(f"  [early-stop] {league_path}: {EARLY_STOP_THRESHOLD} vazios + {len(anchors_to_probe)} anchors vazios — {n_cached} seasons cacheadas")
+                            break
                 continue
 
+            _consecutive_empty = 0
             # Checkpoint por jogo: pula apenas os ja completos (score + home_away odds)
             done_urls = _scraped_urls(str(writer.path), league_path, season_str)
             matches_to_process = [m for m in all_matches if m["match_url"] not in done_urls]
