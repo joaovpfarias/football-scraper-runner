@@ -86,11 +86,8 @@ def _season_is_final(suffix) -> bool:
     except (TypeError, ValueError):
         return False
 
-PARALLEL_LEAGUES  = 1   # 1 torneio por vez (evita travar a maquina)
-# 12->24: onda 26950452680 confirmou zero OOM com 12 (todos cancelled, nenhum failed).
-# 24x~150MB=3.6GB browser + 1GB overhead = ~4.6GB de 7GB. IO-bound: +paginas = +throughput.
-# Se OOM (conclusion=failed), voltar p/ 12.
-PARALLEL_MATCHES  = 28  # matches em paralelo (usa todas as paginas do pool)
+PARALLEL_LEAGUES  = 4   # ligas em paralelo por shard (4 ligas × 7 matches = 28 pages total)
+PARALLEL_MATCHES  = 7   # matches em paralelo por liga — semaforo GLOBAL (compartilhado entre ligas)
 BROWSER_POOL      = 28  # paginas Chromium no pool
 USE_CACHE         = True
 PAGE_FULL         = 40  # se a pg1 trouxe >= isso, provavelmente ha mais paginas
@@ -531,10 +528,10 @@ async def _process_match(
 
 async def scrape_league(
     br: OddsPortalBrowser, league_path: str, writer: SQLiteWriter,
-    league_sem: asyncio.Semaphore, idx: int = 0, total: int = 0,
+    league_sem: asyncio.Semaphore, match_sem: asyncio.Semaphore,
+    idx: int = 0, total: int = 0,
 ):
     async with league_sem:
-        match_sem = asyncio.Semaphore(PARALLEL_MATCHES)
         tier = _league_tier(league_path)
         _matches_total = 0
         _empty_seasons = 0
@@ -772,8 +769,9 @@ async def main():
 
         # --- Fase 2: scraping de todos os torneios ---
         league_sem = asyncio.Semaphore(PARALLEL_LEAGUES)
+        match_sem  = asyncio.Semaphore(PARALLEL_MATCHES)  # global: compartilhado entre ligas
         tasks = [
-            scrape_league(br, lg, writer, league_sem, idx, len(all_leagues))
+            scrape_league(br, lg, writer, league_sem, match_sem, idx, len(all_leagues))
             for idx, lg in enumerate(all_leagues, 1)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
