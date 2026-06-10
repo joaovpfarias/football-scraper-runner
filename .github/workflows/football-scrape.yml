@@ -307,6 +307,40 @@ jobs:
           echo "Shards com timeout/falha: $TIMED_OUT"
           echo "Ligas incompletas: $INCOMPLETE_COUNT"
 
+          # --- PROGRESS REPORT ---
+          gh run download ${{ github.run_id }} \
+            --repo ${{ github.repository }} \
+            --name discovered-slugs \
+            --dir /tmp/slugs/ 2>/dev/null || true
+          TOTAL_LIGAS=0
+          if [ -f /tmp/slugs/discovered_football_leagues.json ]; then
+            TOTAL_LIGAS=$(python3 -c "import json; print(len(json.load(open('/tmp/slugs/discovered_football_leagues.json'))))")
+          fi
+          EVENTS=$(python3 -c "
+import sqlite3, glob
+dbs = glob.glob('/tmp/shards/**/*.db', recursive=True) + glob.glob('/tmp/shards/*.db')
+if not dbs:
+    print(0)
+else:
+    c = sqlite3.connect(dbs[0])
+    try: print(c.execute('SELECT COUNT(*) FROM events').fetchone()[0])
+    except: print(0)
+    c.close()
+" 2>/dev/null || echo 0)
+          if [ "$TOTAL_LIGAS" -gt "0" ]; then
+            COMPLETE=$((TOTAL_LIGAS - INCOMPLETE_COUNT))
+            PCT=$(python3 -c "print(f'{$COMPLETE/$TOTAL_LIGAS*100:.1f}')")
+            ATTEMPT_NOW=${{ github.event.inputs.attempt || '1' }}
+            echo "=========================================="
+            echo "  PROGRESSO WAVE ${ATTEMPT_NOW}"
+            echo "  Ligas completas : ${COMPLETE} / ${TOTAL_LIGAS}"
+            echo "  Incompletas     : ${INCOMPLETE_COUNT}"
+            echo "  Conclusao       : ${PCT}%"
+            echo "  Eventos no DB   : ${EVENTS}"
+            echo "=========================================="
+          fi
+          # --- FIM PROGRESS REPORT ---
+
           # FIX: usa o input 'attempt' que persiste entre runs (run_attempt reseta para 1 em cada novo dispatch)
           ATTEMPT=${{ github.event.inputs.attempt || '1' }}
           MAX_ATTEMPTS=20
