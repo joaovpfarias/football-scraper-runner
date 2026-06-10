@@ -329,7 +329,7 @@ else:
 " 2>/dev/null || echo 0)
           if [ "$TOTAL_LIGAS" -gt "0" ]; then
             COMPLETE=$((TOTAL_LIGAS - INCOMPLETE_COUNT))
-            PCT=$(python3 -c "print(f'{$COMPLETE/$TOTAL_LIGAS*100:.1f}')")
+            PCT=$(python3 -c "print(round($COMPLETE/$TOTAL_LIGAS*100, 1))")
             ATTEMPT_NOW=${{ github.event.inputs.attempt || '1' }}
             echo "=========================================="
             echo "  PROGRESSO WAVE ${ATTEMPT_NOW}"
