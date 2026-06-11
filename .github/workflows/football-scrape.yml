@@ -314,7 +314,7 @@ jobs:
             --dir /tmp/slugs/ 2>/dev/null || true
           TOTAL_LIGAS=0
           if [ -f /tmp/slugs/discovered_football_leagues.json ]; then
-            TOTAL_LIGAS=$(python3 -c "import json; print(len(json.load(open('/tmp/slugs/discovered_football_leagues.json'))))")
+            TOTAL_LIGAS=$(python3 -c "import json; d=json.load(open('/tmp/slugs/discovered_football_leagues.json')); print(len(d['leagues']) if isinstance(d,dict) else len(d))")
           fi
           EVENTS=$(gh release view football-latest --repo ${{ github.repository }} --json body --jq '.body' 2>/dev/null | grep -oP '[0-9]+ eventos' | grep -oP '[0-9]+' || echo 0)
           if [ "$TOTAL_LIGAS" -gt "0" ]; then
