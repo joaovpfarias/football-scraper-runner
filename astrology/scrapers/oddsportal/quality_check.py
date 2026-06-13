@@ -25,6 +25,12 @@ def check(db_path: str, output_json: str = "incomplete_leagues.json") -> list[di
                    ) THEN 1 ELSE 0 END) AS with_odds
         FROM events e
         JOIN leagues l ON l.id = e.league_id
+        -- So eventos passados ha 2+ dias contam: jogos agendados/ao vivo nunca
+        -- teriam score e inflavam a metrica para sempre (1.4k -> 2.3k "incompletas").
+        -- dt_utc e ISO 'YYYY-MM-DDT...' — comparacao lexical com datetime() funciona
+        -- no nivel do dia, suficiente para um corte de -2 dias.
+        WHERE e.dt_utc IS NOT NULL AND e.dt_utc != ''
+          AND e.dt_utc < datetime('now', '-2 days')
         GROUP BY l.path, e.season
         HAVING scored < total OR with_odds < total
         ORDER BY (total - scored) DESC

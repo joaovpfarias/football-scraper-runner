@@ -30,11 +30,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: .github/workflows/football-scrape.yml
+
+      # Cache do binario do Chromium (~150MB): corta ~3-4 min de apt/download por job.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
 
       - name: Install deps
         run: |
           pip install ${{ env.REQS }}
-          playwright install --with-deps chromium
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
+            playwright install-deps chromium
+            playwright install chromium
+          else
+            playwright install --with-deps chromium
+          fi
 
       - name: Discovery only
         env:
@@ -49,7 +64,7 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # 2) Scrape: 20 jobs paralelos (limite free tier GitHub Actions)
+  # 2) Scrape: 10 jobs paralelos
   # ---------------------------------------------------------------------------
   scrape:
     needs: discover
@@ -65,17 +80,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: .github/workflows/football-scrape.yml
+
+      # Cache do binario do Chromium (~150MB): corta ~3-4 min de apt/download por job.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
 
       - name: Install deps
         run: |
           pip install ${{ env.REQS }}
-          playwright install --with-deps chromium
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
+            playwright install-deps chromium
+            playwright install chromium
+          else
+            playwright install --with-deps chromium
+          fi
 
       # Memória persistente: baixa o DB FINAL merged da última run concluída.
       # Cada shard começa com TODOS os dados já raspados (não só os do shard anterior),
       # então _scraped_urls() pula corretamente qualquer jogo já feito por qualquer shard.
-      # Fallback: tenta o Release 'latest' (persistência além de 90 dias de artifact).
-      - name: Download seed DB (DB final da ultima run ou release latest)
+      # Fallback: tenta o Release 'football-latest' (persistência além de 90 dias de artifact).
+      - name: Download seed DB (DB final da ultima run ou release football-latest)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,7 +114,7 @@ jobs:
           SEED_DIR="${{ github.workspace }}/seed"
           mkdir -p "$SEED_DIR"
 
-          # Release 'latest' PRIMEIRO: e a fonte canonica protegida pelo guard
+          # Release 'football-latest' PRIMEIRO: e a fonte canonica protegida pelo guard
           # monotonico (nunca encolhe). O artifact da ultima run pode estar craterado
           # (seed falho/merge parcial), entao NAO confiar nele como primario.
           echo "Baixando seed do Release football-latest (canonico)..."
@@ -132,6 +162,10 @@ jobs:
           SHARD_ID: ${{ matrix.shard }}
           TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
           DB_PATH_OVERRIDE: ${{ github.workspace }}/shard-${{ matrix.shard }}.db
+          # Graceful shutdown: o script para sozinho aos 330 min e grava shard_status.json,
+          # em vez de ser morto pelo timeout-minutes (350) perdendo trabalho in-flight.
+          TIME_BUDGET_MIN: '330'
+          STATUS_PATH: ${{ github.workspace }}/shard_status.json
         run: python astrology/scrapers/oddsportal/scrape_football_history.py
 
       - name: Checkpoint WAL (garante dados no .db antes do upload)
@@ -156,8 +190,19 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+      # Artifact separado e minusculo: o continue baixa so os status-* (nao os DBs)
+      # para saber se algum shard ainda tinha trabalho quando o budget acabou.
+      - name: Upload shard status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-${{ matrix.shard }}
+          path: ${{ github.workspace }}/shard_status.json
+          retention-days: 7
+          if-no-files-found: warn
+
   # ---------------------------------------------------------------------------
-  # 3) Merge: junta os 20 DBs + seed historico num so DB final
+  # 3) Merge: junta os 10 DBs + seed historico num so DB final
   # ---------------------------------------------------------------------------
   merge:
     needs: scrape
@@ -217,10 +262,10 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
-      # Memoria permanente: publica o DB final como release 'latest'.
+      # Memoria permanente: publica o DB final como release 'football-latest'.
       # Artifacts expiram em 90 dias; releases nao expiram.
       # Proximas runs (mesmo meses depois) baixam esse release como seed.
-      - name: Publicar DB no release latest (memoria permanente)
+      - name: Publicar DB no release football-latest (memoria permanente)
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -238,8 +283,7 @@ jobs:
           print(n)
           " 2>/dev/null || echo "?")
           TAG="football-latest"
-          # Guard MONOTONICO: nunca clobberar o Release com um DB MENOR. Um seed falho
-          # ou merge parcial ja cratou 41k -> 5k eventos. So publica se EVENTS >= atual.
+          # Guard MONOTONICO: nunca clobberar o Release com um DB MENOR.
           if [ "${EVENTS:-0}" = "?" ]; then EVENTS=0; fi
           mkdir -p /tmp/curr
           gh release download "$TAG" --repo ${{ github.repository }} \
@@ -258,7 +302,7 @@ jobs:
           fi
           echo "Guard OK: novo=$EVENTS >= atual=$CUR — publicando."
           NOTES="DB gerado em $(date -u '+%Y-%m-%d %H:%M UTC') | $EVENTS eventos | $SZ"
-          # Cria ou atualiza o release latest
+          # Cria ou atualiza o release football-latest
           gh release view "$TAG" --repo ${{ github.repository }} 2>/dev/null \
             && gh release edit "$TAG" \
                 --repo ${{ github.repository }} \
@@ -274,6 +318,32 @@ jobs:
             --clobber
           echo "Release football-latest atualizado: $EVENTS eventos, $SZ"
 
+      # Historico de eventos por onda (asset events_history.txt no release football-latest).
+      # O job continue usa as 2 ultimas linhas para calcular o ganho marginal da onda
+      # (criterio de convergencia). Roda mesmo se o guard monotonico pulou o publish.
+      - name: Registrar eventos da onda no events_history.txt
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f football_history_full.db ]; then exit 0; fi
+          gh release view football-latest --repo ${{ github.repository }} >/dev/null 2>&1 || exit 0
+          EVENTS=$(python3 -c "
+          import sqlite3
+          c = sqlite3.connect('football_history_full.db')
+          print(c.execute('SELECT COUNT(*) FROM events').fetchone()[0])
+          " 2>/dev/null || echo 0)
+          gh release download football-latest --repo ${{ github.repository }} \
+            --pattern "events_history.txt" --dir /tmp/hist 2>/dev/null || true
+          touch /tmp/hist_file.txt
+          [ -f /tmp/hist/events_history.txt ] && cp /tmp/hist/events_history.txt /tmp/hist_file.txt
+          echo "wave=${{ github.event.inputs.attempt || '1' }} events=${EVENTS} run=${{ github.run_id }}" >> /tmp/hist_file.txt
+          cp /tmp/hist_file.txt events_history.txt
+          gh release upload football-latest events_history.txt \
+            --repo ${{ github.repository }} --clobber
+          echo "Historico registrado: wave=${{ github.event.inputs.attempt || '1' }} events=${EVENTS}"
+
   # ---------------------------------------------------------------------------
   # 4) Continue: re-dispara o workflow se houver ligas incompletas
   # ---------------------------------------------------------------------------
@@ -288,13 +358,9 @@ jobs:
         run: |
           echo "Verificando completude da run ${{ github.run_id }}..."
 
-          # Conta shards com timeout, falha ou cancelamento (cancelado = timeout em alguns runners)
-          TIMED_OUT=$(gh run view ${{ github.run_id }} \
-            --repo ${{ github.repository }} \
-            --json jobs \
-            --jq '[.jobs[] | select(.name | test("scrape \\(")) | select(.conclusion == "timed_out" or .conclusion == "failure" or .conclusion == "cancelled")] | length')
-
-          # Verifica se o quality gate encontrou incompletos
+          # Verifica se o quality gate encontrou incompletos (metrica INFORMATIVA:
+          # inclui jogos cronicamente sem score/odds que o backfill ja desistiu de
+          # re-tentar — por isso NAO e mais criterio de redisparo)
           INCOMPLETE_COUNT=0
           gh run download ${{ github.run_id }} \
             --repo ${{ github.repository }} \
@@ -304,13 +370,48 @@ jobs:
             INCOMPLETE_COUNT=$(python3 -c "import json; print(len(json.load(open('/tmp/manifest/incomplete_leagues.json'))))")
           fi
 
-          echo "Shards com timeout/falha: $TIMED_OUT"
-          echo "Ligas incompletas: $INCOMPLETE_COUNT"
+          # Shards com trabalho pendente: baixa os artifacts status-* (minusculos).
+          # exhausted=false -> o shard parou por budget de tempo, ainda ha ligas na fila.
+          # Status ausente (shard crashou) conta como pendente (conservador).
+          gh run download ${{ github.run_id }} \
+            --repo ${{ github.repository }} \
+            --pattern 'status-*' \
+            --dir /tmp/status/ 2>/dev/null || true
+          EXHAUSTED_TRUE=$(python3 -c "
+          import json, glob
+          n = 0
+          for f in glob.glob('/tmp/status/**/shard_status.json', recursive=True):
+              try:
+                  if json.load(open(f)).get('exhausted') is True:
+                      n += 1
+              except Exception:
+                  pass
+          print(n)
+          ")
+          PENDING_SHARDS=$(( ${{ env.TOTAL_SHARDS }} - EXHAUSTED_TRUE ))
+
+          # Ganho marginal da onda: 2 ultimas linhas do events_history.txt do release.
+          # Sem historico suficiente -> GAIN alto (continua raspando).
+          GAIN=999999
+          gh release download football-latest --repo ${{ github.repository }} \
+            --pattern "events_history.txt" --dir /tmp/hist/ 2>/dev/null || true
+          if [ -f /tmp/hist/events_history.txt ]; then
+            GAIN=$(python3 -c "
+          import re
+          lines = open('/tmp/hist/events_history.txt').read().splitlines()
+          ev = [int(m.group(1)) for l in lines if (m := re.search(r'events=(\d+)', l))]
+          print(ev[-1] - ev[-2] if len(ev) >= 2 else 999999)
+          ")
+          fi
+
+          echo "Shards com trabalho pendente: $PENDING_SHARDS / ${{ env.TOTAL_SHARDS }}"
+          echo "Ganho de eventos nesta onda: $GAIN"
+          echo "Ligas incompletas (informativo): $INCOMPLETE_COUNT"
 
           # --- PROGRESS REPORT ---
           gh run download ${{ github.run_id }} \
             --repo ${{ github.repository }} \
-            --name discovered-slugs \
+            --name discovered-football-slugs \
             --dir /tmp/slugs/ 2>/dev/null || true
           TOTAL_LIGAS=0
           if [ -f /tmp/slugs/discovered_football_leagues.json ]; then
@@ -319,31 +420,31 @@ jobs:
           EVENTS=$(gh release view football-latest --repo ${{ github.repository }} --json body --jq '.body' 2>/dev/null | grep -oP '[0-9]+ eventos' | grep -oP '[0-9]+' || echo 0)
           if [ "$TOTAL_LIGAS" -gt "0" ]; then
             COMPLETE=$((TOTAL_LIGAS - INCOMPLETE_COUNT))
+            if [ "$COMPLETE" -lt "0" ]; then COMPLETE=0; fi
             PCT=$(python3 -c "print(round($COMPLETE/$TOTAL_LIGAS*100, 1))")
             ATTEMPT_NOW=${{ github.event.inputs.attempt || '1' }}
             echo "=========================================="
             echo "  PROGRESSO WAVE ${ATTEMPT_NOW}"
-            echo "  Ligas completas : ${COMPLETE} / ${TOTAL_LIGAS}"
-            echo "  Incompletas     : ${INCOMPLETE_COUNT}"
-            echo "  Conclusao       : ${PCT}%"
-            echo "  Eventos no DB   : ${EVENTS}"
+            echo "  Ligas no discovery        : ${TOTAL_LIGAS}"
+            echo "  (liga,season) incompletas : ${INCOMPLETE_COUNT}"
+            echo "  Shards com fila pendente  : ${PENDING_SHARDS}"
+            echo "  Eventos no DB             : ${EVENTS}"
+            echo "  Ganho nesta onda          : ${GAIN}"
             echo "=========================================="
           fi
           # --- FIM PROGRESS REPORT ---
 
-          # FIX: usa o input 'attempt' que persiste entre runs (run_attempt reseta para 1 em cada novo dispatch)
           ATTEMPT=${{ github.event.inputs.attempt || '1' }}
-          MAX_ATTEMPTS=20
+          MAX_ATTEMPTS=60
 
-          if [ "$TIMED_OUT" -gt "0" ] || [ "$INCOMPLETE_COUNT" -gt "0" ]; then
+          # Convergencia: continua enquanto algum shard tem fila pendente OU a onda
+          # ainda rendeu >= 500 eventos novos. Para quando ambos secarem.
+          if [ "$PENDING_SHARDS" -gt "0" ] || [ "$GAIN" -ge "500" ]; then
             if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
               echo "Atingido limite de $MAX_ATTEMPTS tentativas automaticas. Parando."
               exit 0
             fi
             # CORRENTE UNICA: so dispara a proxima se NAO houver outra onda ativa.
-            # Sem isso, multiplas chains (continue + dispatches) acumulam 40+ shards
-            # disputando os 20 slots da conta -> a 2a onda espera ~6h na fila.
-            # Uma de cada vez = arranca na hora, cadencia limpa de ~6h.
             ACTIVE=$(gh run list \
               --workflow football-scrape.yml \
               --repo ${{ github.repository }} \
@@ -360,5 +461,6 @@ jobs:
               --ref ${{ github.ref_name }} \
               --field attempt="$NEXT_ATTEMPT"
           else
-            echo "Todos os dados completos! Nenhuma re-execucao necessaria."
+            echo "CONVERGIU: todos os shards esgotaram a fila e o ganho da onda foi < 500 eventos."
+            echo "Corrente encerrada. Para retomar: gh workflow run football-scrape.yml --field attempt=1"
           fi

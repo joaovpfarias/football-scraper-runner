@@ -148,67 +148,84 @@ class OddsPortalBrowser:
 
     @retry(
         stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=3, min=3, max=30),
+        # Backoff curto: 16 ondas com 28 paginas paralelas sem bloqueio do site;
+        # o 3-30s anterior so adicionava latencia morta em timeouts transientes.
+        wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
     async def fetch(self, url: str, wait_selector: str | None = ODDS_WAIT_SELECTOR) -> str:
         async with self._page() as page:
             await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+            selector_ok = False
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=WAIT_TIMEOUT_MS)
+                    selector_ok = True
                 except Exception:
                     pass
-            await asyncio.sleep(random.uniform(0.3, 0.7))
+            # Seletor presente = dados ja renderizados; sleep curto basta. Seletor
+            # ausente = pagina lenta/vazia; mantem sleep maior para nao gravar um
+            # false-empty permanente (cache de seasons vazias).
+            await asyncio.sleep(random.uniform(0.1, 0.25) if selector_ok else random.uniform(0.4, 0.7))
             return await page.content()
 
-    async def fetch_all_tabs(self, match_url: str, tab_labels: list[str]) -> dict[str, str]:
+    async def fetch_match(self, match_url: str, tab_labels: list[str]) -> tuple[str, dict[str, str]]:
         """
-        Abre a match page e coleta HTML de cada tab de mercado clicando no elemento.
+        UMA navegacao por jogo: abre a match page, captura o HTML principal
+        (header com score/data) e coleta o HTML de cada tab de mercado clicando.
 
-        tab_labels: lista de labels como exibidos na UI ("Home/Away", "1X2", etc.)
-        Retorna {label: html}. O label "" nao e solicitado aqui; use self.fetch() para
-        o HTML padrao da match page.
+        Substitui o par fetch(match_url) + fetch_all_tabs(match_url) que abria a
+        MESMA pagina duas vezes (2 navegacoes por jogo no hot path).
+
+        Retorna (main_html, {label: html}). Tabs ausentes na pagina sao ignoradas.
         """
-        result = {}
-        if not tab_labels:
-            return result
+        result: dict[str, str] = {}
         async with self._page() as page:
             await page.goto(match_url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+            selector_ok = False
             try:
                 await page.wait_for_selector(ODDS_WAIT_SELECTOR, timeout=WAIT_TIMEOUT_MS)
+                selector_ok = True
             except Exception:
                 pass
-            await asyncio.sleep(random.uniform(0.3, 0.7))
+            await asyncio.sleep(random.uniform(0.1, 0.25) if selector_ok else random.uniform(0.4, 0.7))
+            main_html = await page.content()
 
-            # Captura tab ativa atual
+            # Captura tab ativa atual (ja renderizada — sem custo extra)
             active_el = await page.query_selector('[data-testid="navigation-active-tab"]')
             active_label = (await active_el.inner_text()).strip() if active_el else ""
             if active_label:
-                result[active_label] = await page.content()
+                result[active_label] = main_html
 
             for label in tab_labels:
                 if label == active_label:
                     continue
                 inactive_tabs = await page.query_selector_all('[data-testid="navigation-inactive-tab"]')
-                clicked = False
                 for tab in inactive_tabs:
                     try:
                         text = (await tab.inner_text()).strip()
                         if text == label:
                             await tab.click()
+                            tab_ok = False
                             try:
                                 await page.wait_for_selector(
                                     '[data-testid="over-under-expanded-row"]',
                                     timeout=WAIT_TIMEOUT_MS,
                                 )
+                                tab_ok = True
                             except Exception:
                                 pass
-                            await asyncio.sleep(random.uniform(0.3, 0.6))
+                            await asyncio.sleep(random.uniform(0.15, 0.3) if tab_ok else random.uniform(0.3, 0.6))
                             result[label] = await page.content()
-                            clicked = True
                             break
                     except Exception:
                         continue
                 # Tab nao encontrada / indisponivel — segue
+        return main_html, result
+
+    async def fetch_all_tabs(self, match_url: str, tab_labels: list[str]) -> dict[str, str]:
+        """Compat: como fetch_match, mas retorna so o dict de tabs."""
+        if not tab_labels:
+            return {}
+        _, result = await self.fetch_match(match_url, tab_labels)
         return result
