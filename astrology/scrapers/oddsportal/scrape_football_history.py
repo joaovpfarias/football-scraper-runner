@@ -92,9 +92,11 @@ def _all_tab_labels() -> list[str]:
 
 
 # Anos para tentar com sufixo de season - ordem REVERSA (mais recente primeiro)
-# Combinado com early-stop: torneios discontinuados nao gastam 16 fetches.
+# Para cada ano Y tentamos "{Y-1}-{Y}" (ligas europeias: Premier, Bundesliga, etc.)
+# e "{Y}" (ligas de ano-calendario: Brasileirao, MLS, Allsvenskan, etc.).
+# O skip-cache garante que anos ja esgotados nao sao re-tentados nas ondas seguintes.
 SEASON_YEARS  = list(range(2026, 1997, -1))   # 2026, 2025, ..., 1998
-SEASON_SUFFIXES = [None] + [str(y) for y in SEASON_YEARS]
+SEASON_SUFFIXES = [None] + [s for y in SEASON_YEARS for s in (f"{y-1}-{y}", str(y))]
 
 EARLY_STOP_THRESHOLD = 3     # vazios consecutivos para disparar o probe
 PROBE_CUTOFF         = 2021  # só dispara se ainda estamos acima desse ano
@@ -112,13 +114,15 @@ def _coalesce_score(primary, fallback):
 
 
 def _season_is_final(suffix) -> bool:
-    """True so para seasons PASSADAS (ano < ano atual): finalizadas, nao mudam mais.
-    A season atual (None = feed ao vivo) e o ano corrente NUNCA viram cache."""
+    """True so para seasons PASSADAS: finalizadas, nao mudam mais.
+    Suporta "YYYY" e "YYYY-YYYY" (ligas europeias).
+    A season atual (None) e qualquer season cujo ano final == ano corrente nunca viram cache."""
     if suffix is None:
         return False
     try:
-        return int(suffix) < _CUR_YEAR
-    except (TypeError, ValueError):
+        end_year = int(str(suffix).split("-")[-1])
+        return end_year < _CUR_YEAR
+    except (TypeError, ValueError, AttributeError):
         return False
 
 PARALLEL_LEAGUES  = 4   # ligas em paralelo por shard (4 ligas × 7 matches = 28 pages total)
