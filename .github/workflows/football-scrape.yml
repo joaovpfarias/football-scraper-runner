@@ -390,22 +390,38 @@ jobs:
           ")
           PENDING_SHARDS=$(( ${{ env.TOTAL_SHARDS }} - EXHAUSTED_TRUE ))
 
-          # Ganho marginal da onda: 2 ultimas linhas do events_history.txt do release.
-          # Sem historico suficiente -> GAIN alto (continua raspando).
+          # Convergencia por streak: quantas ondas consecutivas terminaram sem NENHUM evento novo.
+          # So para quando ZERO_STREAK >= ZERO_STREAK_STOP E nenhum shard tem fila pendente.
+          # Uma onda vazia isolada (early-stop/cache saturado) NAO encerra a corrente.
+          ZERO_STREAK_STOP=15
           GAIN=999999
+          ZERO_STREAK=0
           gh release download football-latest --repo ${{ github.repository }} \
             --pattern "events_history.txt" --dir /tmp/hist/ 2>/dev/null || true
           if [ -f /tmp/hist/events_history.txt ]; then
-            GAIN=$(python3 -c "
-          import re
-          lines = open('/tmp/hist/events_history.txt').read().splitlines()
-          ev = [int(m.group(1)) for l in lines if (m := re.search(r'events=(\d+)', l))]
-          print(ev[-1] - ev[-2] if len(ev) >= 2 else 999999)
-          ")
+            eval "$(python3 -c "
+import re
+lines = open('/tmp/hist/events_history.txt').read().splitlines()
+ev = [int(m.group(1)) for l in lines if (m := re.search(r'events=(\d+)', l))]
+if len(ev) < 2:
+    print('GAIN=999999')
+    print('ZERO_STREAK=0')
+else:
+    gain = ev[-1] - ev[-2]
+    streak = 0
+    for i in range(len(ev)-1, 0, -1):
+        if ev[i] - ev[i-1] <= 0:
+            streak += 1
+        else:
+            break
+    print(f'GAIN={gain}')
+    print(f'ZERO_STREAK={streak}')
+")"
           fi
 
           echo "Shards com trabalho pendente: $PENDING_SHARDS / ${{ env.TOTAL_SHARDS }}"
           echo "Ganho de eventos nesta onda: $GAIN"
+          echo "Streak de ondas zero: $ZERO_STREAK / $ZERO_STREAK_STOP"
           echo "Ligas incompletas (informativo): $INCOMPLETE_COUNT"
 
           # --- PROGRESS REPORT ---
@@ -430,16 +446,18 @@ jobs:
             echo "  Shards com fila pendente  : ${PENDING_SHARDS}"
             echo "  Eventos no DB             : ${EVENTS}"
             echo "  Ganho nesta onda          : ${GAIN}"
+            echo "  Streak ondas zero         : ${ZERO_STREAK}/${ZERO_STREAK_STOP}"
             echo "=========================================="
           fi
           # --- FIM PROGRESS REPORT ---
 
           ATTEMPT=${{ github.event.inputs.attempt || '1' }}
-          MAX_ATTEMPTS=60
+          MAX_ATTEMPTS=500
 
-          # Convergencia: continua enquanto algum shard tem fila pendente OU a onda
-          # ainda rendeu >= 500 eventos novos. Para quando ambos secarem.
-          if [ "$PENDING_SHARDS" -gt "0" ] || [ "$GAIN" -ge "500" ]; then
+          # Convergencia: continua enquanto algum shard tem fila pendente OU o streak de ondas
+          # zeradas e menor que ZERO_STREAK_STOP. So para quando as duas condicoes forem True:
+          # (1) nenhum shard pendente E (2) ZERO_STREAK_STOP ondas consecutivas sem novos dados.
+          if [ "$PENDING_SHARDS" -gt "0" ] || [ "$ZERO_STREAK" -lt "$ZERO_STREAK_STOP" ]; then
             if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
               echo "Atingido limite de $MAX_ATTEMPTS tentativas automaticas. Parando."
               exit 0
@@ -461,6 +479,6 @@ jobs:
               --ref ${{ github.ref_name }} \
               --field attempt="$NEXT_ATTEMPT"
           else
-            echo "CONVERGIU: todos os shards esgotaram a fila e o ganho da onda foi < 500 eventos."
+            echo "CONVERGIU: $ZERO_STREAK ondas consecutivas sem novos eventos (limite: $ZERO_STREAK_STOP) e nenhum shard pendente."
             echo "Corrente encerrada. Para retomar: gh workflow run football-scrape.yml --field attempt=1"
           fi
