@@ -399,24 +399,7 @@ jobs:
           gh release download football-latest --repo ${{ github.repository }} \
             --pattern "events_history.txt" --dir /tmp/hist/ 2>/dev/null || true
           if [ -f /tmp/hist/events_history.txt ]; then
-            eval "$(python3 -c '
-import re
-lines = open("/tmp/hist/events_history.txt").read().splitlines()
-ev = [int(m.group(1)) for l in lines if (m := re.search(r"events=(\d+)", l))]
-if len(ev) < 2:
-    print("GAIN=999999")
-    print("ZERO_STREAK=0")
-else:
-    gain = ev[-1] - ev[-2]
-    streak = 0
-    for i in range(len(ev)-1, 0, -1):
-        if ev[i] - ev[i-1] <= 0:
-            streak += 1
-        else:
-            break
-    print(f"GAIN={gain}")
-    print(f"ZERO_STREAK={streak}")
-')"
+            eval "$(python3 -c 'import re; lines=open("/tmp/hist/events_history.txt").read().splitlines(); ev=[int(m.group(1)) for l in lines if (m:=re.search(r"events=(\d+)",l))]; n=len(ev); gain=ev[-1]-ev[-2] if n>=2 else 999999; pos=[i for i in range(1,n) if ev[i]-ev[i-1]>0]; streak=(n-1-pos[-1]) if pos else (n-1 if n>=2 else 0); print(f"GAIN={gain}"); print(f"ZERO_STREAK={streak}")')"
           fi
 
           echo "Shards com trabalho pendente: $PENDING_SHARDS / ${{ env.TOTAL_SHARDS }}"
