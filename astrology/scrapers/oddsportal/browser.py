@@ -63,9 +63,13 @@ class OddsPortalBrowser:
     async def _make_page(self):
         """Cria um contexto + pagina com stealth. Chamado apenas no __aenter__."""
         ua  = random.choice(USER_AGENTS)
+        # locale configuravel. Scraping mantem en-US (conhecido-funcional: oddsagora
+        # serve conteudo PT independente do locale). O job de discovery seta
+        # BROWSER_LOCALE=pt-BR para extrair slugs PT que batem com o site.
+        locale = os.environ.get("BROWSER_LOCALE", "en-US")
         ctx = await self._browser.new_context(
             user_agent=ua,
-            locale="en-US",
+            locale=locale,
             timezone_id="UTC",
             viewport={"width": 1366, "height": 900},
         )

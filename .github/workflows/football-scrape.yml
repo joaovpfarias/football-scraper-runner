@@ -54,6 +54,8 @@ jobs:
       - name: Discovery only
         env:
           DISCOVER_ONLY: '1'
+          FORCE_DISCOVERY: '1'      # ignora cache stale (slugs EN antigos) e re-descobre
+          BROWSER_LOCALE: 'pt-BR'   # extrai slugs PT que batem com o oddsagora
         run: python astrology/scrapers/oddsportal/scrape_football_history.py
 
       - name: Upload discovered slugs

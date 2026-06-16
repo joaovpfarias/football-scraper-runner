@@ -279,6 +279,9 @@ def _extract_league_slugs(html: str) -> set[str]:
 
 def load_discovered_leagues() -> list[str] | None:
     """Carrega slugs do cache JSON. Retorna None se inexistente, expirado ou vazio."""
+    if os.environ.get("FORCE_DISCOVERY") == "1":
+        print("[discovery] FORCE_DISCOVERY=1 — ignorando cache, re-descobrindo do zero")
+        return None
     try:
         p = Path(DISCOVERY_CACHE_FILE)
         if not p.exists():
