@@ -313,6 +313,9 @@ def save_discovered_leagues(leagues: list[str]) -> None:
 
 
 DISCOVERY_WAIT_SELECTOR = '[data-testid="game-row"], a[href*="/football/"]'
+# Para LISTAGEM de resultados: esperar SO a game-row real (o seletor de discovery
+# acima casa com links de menu e retorna antes das linhas renderizarem -> false-empty).
+LISTING_WAIT_SELECTOR = '[data-testid="game-row"]'
 
 
 async def _fetch_fresh(br: OddsPortalBrowser, url: str, wait_selector: str | None = None) -> str:
@@ -596,56 +599,26 @@ async def scrape_league(
             results_url = url_builder.build_results_url(SPORT_SLUG, league_path, suffix)
             print(f"  [listing] season={season_str or 'atual'}")
 
+            # Listagem + paginacao via CLIQUE (fetch_listing_pages):
+            #  - espera a game-row REAL (corrige false-empty do seletor de menu)
+            #  - clica os botoes "1 2 3 ... Próximo" (a paginacao #/page/N por goto
+            #    nao funciona no oddsagora; so trazia a pg1 ~51 de ~380)
+            #  - re-tenta a pg1 ate 2x antes de declarar vazio (throttle != vazio)
             try:
-                html = await _fetch_cached(br, results_url, wait_selector=DISCOVERY_WAIT_SELECTOR)
+                _pages = await br.fetch_listing_pages(results_url, wait_selector=LISTING_WAIT_SELECTOR)
             except Exception as e:
                 print(f"  [ERRO listing {results_url}]: {e}")
                 continue
 
-            all_matches = results_listing.parse(html)
-
-            # Confirma vazio com 1 retry (bypass cache) antes de seguir: uma carga lenta
-            # ou transiente nao pode virar um false-empty CACHEADO permanente (protege a
-            # completude — mapeamos todos os anos que realmente existem).
-            if not all_matches:
-                try:
-                    html = await _fetch_cached(br, results_url, wait_selector=DISCOVERY_WAIT_SELECTOR, force=True)
-                    all_matches = results_listing.parse(html)
-                except Exception:
-                    pass
-
-            # Paginacao por esgotamento. detect_pagination NAO funciona: os links
-            # #/page/N/ sao hash-routed via JS e nao aparecem no HTML estatico
-            # (sempre retorna 1) -> so pegava a 1a pagina (~50 de ~153 no AO).
-            # Avanca paginas ate 3 seguidas sem match novo. So pagina se a pg1
-            # veio "cheia" (>= PAGE_FULL): torneios pequenos cabem numa pagina.
-            seen_urls = {m["match_url"] for m in all_matches}
-            _pag_ok = True
-            if len(all_matches) >= PAGE_FULL:
-                _pag_ok = False
-                no_new = 0
-                pg = 2
-                while pg <= MAX_RESULT_PAGES:
-                    page_url = f"{results_url}#/page/{pg}/"
-                    try:
-                        h = await _fetch_cached(br, page_url, wait_selector=DISCOVERY_WAIT_SELECTOR)
-                        pg_matches = results_listing.parse(h)
-                    except Exception:
-                        break
-                    new = [m for m in pg_matches if m["match_url"] not in seen_urls]
-                    for m in new:
+            seen_urls = set()
+            all_matches = []
+            for _h in _pages:
+                for m in results_listing.parse(_h):
+                    if m["match_url"] not in seen_urls:
                         seen_urls.add(m["match_url"])
                         all_matches.append(m)
-                    if new:
-                        no_new = 0
-                    else:
-                        no_new += 1
-                        if no_new >= 3:
-                            _pag_ok = True
-                            break
-                    pg += 1
-                else:
-                    _pag_ok = True
+            # A paginacao por clique esgota todas as paginas -> pass completa.
+            _pag_ok = True
 
             if not all_matches:
                 print(f"  [vazio] sem matches em {results_url}")
@@ -669,11 +642,11 @@ async def scrape_league(
                         for anchor_year in anchors_to_probe:
                             probe_url = url_builder.build_results_url(SPORT_SLUG, league_path, str(anchor_year))
                             try:
-                                probe_html = await _fetch_cached(br, probe_url, wait_selector=DISCOVERY_WAIT_SELECTOR)
+                                probe_html = await _fetch_cached(br, probe_url, wait_selector=LISTING_WAIT_SELECTOR)
                                 probe_matches = results_listing.parse(probe_html)
                                 if not probe_matches:
                                     probe_html = await _fetch_cached(br, probe_url,
-                                                                     wait_selector=DISCOVERY_WAIT_SELECTOR, force=True)
+                                                                     wait_selector=LISTING_WAIT_SELECTOR, force=True)
                                     probe_matches = results_listing.parse(probe_html)
                             except Exception:
                                 probe_matches = []

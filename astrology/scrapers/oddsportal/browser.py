@@ -45,6 +45,11 @@ WAIT_TIMEOUT_MS = 15_000   # mantido alto de proposito: com o cache de seasons v
 # a carga (menos bytes/render) sem mudar os dados. Mantemos document/script/xhr/fetch.
 _BLOCKED_RESOURCES = {"image", "media", "font"}
 ODDS_WAIT_SELECTOR = '[data-testid="over-under-expanded-row"], [data-testid="navigation-active-tab"]'
+# Listagem de resultados: esperar SO pela game-row real. O seletor antigo incluia
+# `a[href*="/<sport>/"]` que casa com links do MENU instantaneamente -> fetch
+# retornava ~0.5s ANTES das linhas renderizarem (JS) -> 0 matches -> season
+# falsamente cacheada como vazia. Esperar a game-row de fato corrige a cobertura.
+LISTING_WAIT_SELECTOR = '[data-testid="game-row"]'
 
 
 class OddsPortalBrowser:
@@ -168,6 +173,76 @@ class OddsPortalBrowser:
             # false-empty permanente (cache de seasons vazias).
             await asyncio.sleep(random.uniform(0.1, 0.25) if selector_ok else random.uniform(0.4, 0.7))
             return await page.content()
+
+    async def _click_pagination(self, page, text: str) -> bool:
+        """Clica num controle de paginacao cujo texto == `text`. True se clicou."""
+        try:
+            els = await page.query_selector_all('[class*=pagination] *')
+        except Exception:
+            return False
+        for el in els:
+            try:
+                if (await el.inner_text()).strip() == text:
+                    await el.click(timeout=5000)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def fetch_listing_pages(
+        self,
+        url: str,
+        wait_selector: str = LISTING_WAIT_SELECTOR,
+        max_pages: int = 60,
+        empty_retries: int = 2,
+    ) -> list[str]:
+        """Abre a listagem de resultados e PAGINA clicando nos botoes de pagina.
+
+        oddsagora pagina via JS (a URL `#/page/N/` com goto sempre renderiza a pg1).
+        A unica forma confiavel e clicar nos controles "1 2 3 ... Próximo".
+        Retorna a lista de HTMLs (um por pagina); o caller parseia e dedupa por match_url.
+
+        - Espera a game-row REAL (nao um link de menu) antes de ler o HTML.
+        - Re-tenta a pg1 ate `empty_retries` vezes (pagina lenta/throttle nao pode
+          virar um false-empty permanente).
+        """
+        htmls: list[str] = []
+        first_html = ""
+        for attempt in range(empty_retries + 1):
+            async with self._page() as page:
+                try:
+                    await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                except Exception:
+                    continue
+                try:
+                    await page.wait_for_selector(wait_selector, timeout=WAIT_TIMEOUT_MS)
+                except Exception:
+                    pass
+                await asyncio.sleep(random.uniform(0.4, 0.7))
+                first_html = await page.content()
+                if 'data-testid="game-row"' in first_html:
+                    # Tem dados — pagina nesta mesma sessao de pagina
+                    htmls.append(first_html)
+                    n = 2
+                    while n <= max_pages:
+                        clicked = await self._click_pagination(page, str(n))
+                        if not clicked:
+                            clicked = (await self._click_pagination(page, "Próximo")
+                                       or await self._click_pagination(page, "Proximo"))
+                            if not clicked:
+                                break
+                        try:
+                            await page.wait_for_selector(wait_selector, timeout=WAIT_TIMEOUT_MS)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(random.uniform(1.0, 1.5))
+                        htmls.append(await page.content())
+                        n += 1
+                    return htmls
+            # pg1 sem game-row: backoff e re-tenta (pode ser throttle/lentidao)
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+        # Esgotou as tentativas sem game-row -> retorna o ultimo HTML (vazio de fato)
+        return [first_html] if first_html else []
 
     async def fetch_match(self, match_url: str, tab_labels: list[str]) -> tuple[str, dict[str, str]]:
         """
