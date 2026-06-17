@@ -205,8 +205,8 @@ KNOWN_LEAGUES = [
     "italy/serie-a",
     "germany/bundesliga",
     "france/ligue-1",
-    # --- Competicoes europeias ---
-    "europe/champions-league",
+    # --- Competicoes europeias --- (slugs PT do oddsagora; champions-league EN = 404)
+    "europe/liga-dos-campeoes",
     "europe/liga-europa",
     "europe/liga-conferencia-europa",
     # --- Brasil ---
@@ -231,7 +231,7 @@ KNOWN_LEAGUES = [
 # ---------------------------------------------------------------------------
 
 _TIER_TOP = {
-    "europe/champions-league", "europe/liga-europa", "europe/liga-conferencia-europa",
+    "europe/liga-dos-campeoes", "europe/liga-europa", "europe/liga-conferencia-europa",
     "england/campeonato-ingles", "spain/laliga", "italy/serie-a",
     "germany/bundesliga", "france/ligue-1",
 }
