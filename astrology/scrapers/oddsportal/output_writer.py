@@ -311,7 +311,9 @@ class SQLiteWriter:
         if row is None:
             return False
         n_matches, completed_at = (row[0] or 0), (row[1] or "")
-        if n_matches > 0:
+        if n_matches != 0:
+            # n>0 = tem dados; n<0 = slug quebrado/404 conhecido (nao re-tentar — so
+            # muda com correcao de slug, que e outra chave). Auditoria trata n<0 como gap.
             return True
         return completed_at >= CACHE_EPOCH
 

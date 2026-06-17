@@ -199,12 +199,17 @@ class OddsPortalBrowser:
         wait_selector: str = LISTING_WAIT_SELECTOR,
         max_pages: int = 60,
         empty_retries: int = 2,
-    ) -> list[str]:
+    ) -> tuple[list[str], int | None]:
         """Abre a listagem de resultados e PAGINA clicando nos botoes de pagina.
 
         oddsagora pagina via JS (a URL `#/page/N/` com goto sempre renderiza a pg1).
         A unica forma confiavel e clicar nos controles "1 2 3 ... Próximo".
-        Retorna a lista de HTMLs (um por pagina); o caller parseia e dedupa por match_url.
+
+        Retorna (htmls, http_status):
+        - htmls: lista de HTMLs (um por pagina); o caller parseia e dedupa por match_url.
+        - http_status: status HTTP do goto da pg1 (200 = pagina valida; 404 = slug
+          quebrado/inexistente). CRITICO p/ a garantia de completude: vazio com 200 =
+          fonte sem dados (real); vazio com 404 = slug errado (NAO confirmar vazio).
 
         - Espera a game-row REAL (nao um link de menu) antes de ler o HTML.
         - Re-tenta a pg1 ate `empty_retries` vezes (pagina lenta/throttle nao pode
@@ -212,10 +217,13 @@ class OddsPortalBrowser:
         """
         htmls: list[str] = []
         first_html = ""
+        last_status: int | None = None
         for attempt in range(empty_retries + 1):
             async with self._page() as page:
                 try:
-                    await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    resp = await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    if resp is not None:
+                        last_status = resp.status
                 except Exception:
                     continue
                 try:
@@ -242,11 +250,11 @@ class OddsPortalBrowser:
                         await asyncio.sleep(random.uniform(1.0, 1.5))
                         htmls.append(await page.content())
                         n += 1
-                    return htmls
+                    return htmls, last_status
             # pg1 sem game-row: backoff e re-tenta (pode ser throttle/lentidao)
             await asyncio.sleep(random.uniform(1.5, 3.0))
-        # Esgotou as tentativas sem game-row -> retorna o ultimo HTML (vazio de fato)
-        return [first_html] if first_html else []
+        # Esgotou as tentativas sem game-row -> retorna o ultimo HTML + status
+        return ([first_html] if first_html else []), last_status
 
     async def fetch_match(self, match_url: str, tab_labels: list[str]) -> tuple[str, dict[str, str]]:
         """
