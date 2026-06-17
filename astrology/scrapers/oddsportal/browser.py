@@ -162,7 +162,8 @@ class OddsPortalBrowser:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-    async def fetch(self, url: str, wait_selector: str | None = ODDS_WAIT_SELECTOR) -> str:
+    async def fetch(self, url: str, wait_selector: str | None = ODDS_WAIT_SELECTOR,
+                    settle: float | None = None) -> str:
         async with self._page() as page:
             await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
             selector_ok = False
@@ -172,10 +173,13 @@ class OddsPortalBrowser:
                     selector_ok = True
                 except Exception:
                     pass
-            # Seletor presente = dados ja renderizados; sleep curto basta. Seletor
-            # ausente = pagina lenta/vazia; mantem sleep maior para nao gravar um
-            # false-empty permanente (cache de seasons vazias).
-            await asyncio.sleep(random.uniform(0.1, 0.25) if selector_ok else random.uniform(0.4, 0.7))
+            # settle explicito (discovery): espera fixa p/ TODA a grade renderizar
+            # (extrair todos os slugs PT, nao só os primeiros). Sem settle: sleep curto
+            # se o seletor ja apareceu, maior se nao (evita false-empty permanente).
+            if settle is not None:
+                await asyncio.sleep(settle)
+            else:
+                await asyncio.sleep(random.uniform(0.1, 0.25) if selector_ok else random.uniform(0.4, 0.7))
             return await page.content()
 
     async def _click_pagination(self, page, text: str) -> bool:
