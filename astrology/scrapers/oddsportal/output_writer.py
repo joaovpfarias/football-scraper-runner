@@ -14,12 +14,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Cutoff de deploy do fix de cobertura (selector/paginacao/false-empty).
-# Entradas de season_state com n_matches=0 marcadas ANTES deste instante sao
-# suspeitas (cache envenenado pelo bug antigo) e NAO devem ser confiadas como
-# "season vazia" -> a season e re-listada pelo codigo corrigido. Vazios marcados
-# DEPOIS do cutoff (codigo novo, selector+paginacao corretos) sao confiaveis.
-# Sobrescrevivel por env CACHE_EPOCH (ISO UTC) para futuros redeploys.
+# Cutoff de deploy do fix de cobertura. Vazios (n=0) marcados ANTES disso sao
+# suspeitos (cache envenenado pelo bug antigo) e nao confiaveis. Override por env.
 CACHE_EPOCH = os.environ.get("CACHE_EPOCH", "2026-06-16T18:00:00Z")
 
 # ---------------------------------------------------------------------------
@@ -71,7 +67,11 @@ CREATE TABLE IF NOT EXISTS events (
     dt_local      TEXT    DEFAULT '',
     score_home    INTEGER,
     score_away    INTEGER,
-    sets_detail   TEXT    DEFAULT '',
+    partials      TEXT    DEFAULT '',
+    score_home_ht INTEGER,
+    score_away_ht INTEGER,
+    score_home_2h INTEGER,
+    score_away_2h INTEGER,
     status        TEXT    DEFAULT 'scheduled',
     venue         TEXT    DEFAULT '',
     venue_city    TEXT    DEFAULT '',
@@ -192,21 +192,33 @@ class SQLiteWriter:
         sa_val = int(sa) if sa not in ("", None) else None
         status = row.get("status", "scheduled")
 
-        sets_detail = row.get("sets_detail", "") or ""
+        partials = row.get("partials", "") or ""
+        sh_ht = row.get("score_home_ht")
+        sa_ht = row.get("score_away_ht")
+        sh_ht_val = int(sh_ht) if sh_ht not in ("", None) else None
+        sa_ht_val = int(sa_ht) if sa_ht not in ("", None) else None
+        sh_2h = row.get("score_home_2h")
+        sa_2h = row.get("score_away_2h")
+        sh_2h_val = int(sh_2h) if sh_2h not in ("", None) else None
+        sa_2h_val = int(sa_2h) if sa_2h not in ("", None) else None
         self._con.execute(
             """INSERT OR IGNORE INTO events
                (id, league_id, season, home_id, away_id,
-                dt_utc, dt_local, score_home, score_away, sets_detail, status,
+                dt_utc, dt_local, score_home, score_away, partials, status,
+                score_home_ht, score_away_ht,
+                score_home_2h, score_away_2h,
                 venue, venue_city, venue_country, venue_lat, venue_lon,
                 source_url, scraped_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 row["event_id"], league_id,
                 row.get("season", ""),
                 home_id, away_id,
                 row.get("event_datetime_utc", ""),
                 row.get("event_datetime_local", ""),
-                sh_val, sa_val, sets_detail, status,
+                sh_val, sa_val, partials, status,
+                sh_ht_val, sa_ht_val,
+                sh_2h_val, sa_2h_val,
                 row.get("venue", ""),
                 row.get("venue_city", ""),
                 row.get("venue_country", ""),
@@ -219,9 +231,9 @@ class SQLiteWriter:
         # Se o evento ja existia sem placar, atualiza score/sets/status
         if sh_val is not None:
             self._con.execute(
-                """UPDATE events SET score_home=?, score_away=?, sets_detail=?, status=?, scraped_at=?
+                """UPDATE events SET score_home=?, score_away=?, partials=?, status=?, scraped_at=?
                    WHERE id=? AND score_home IS NULL""",
-                (sh_val, sa_val, sets_detail, status, row.get("scraped_at_utc", ""), row["event_id"]),
+                (sh_val, sa_val, partials, status, row.get("scraped_at_utc", ""), row["event_id"]),
             )
         # Preenche a season quando o evento foi criado pela feed atual (season="")
         # e agora chega da passada com sufixo de ano. Sem isso ~28% ficava sem ano.
@@ -297,12 +309,11 @@ class SQLiteWriter:
     # ----------------------------------------------------- season checkpoint
 
     def is_season_complete(self, league_path: str, season: str) -> bool:
-        """True se esta liga-season ja foi raspada por completo numa onda anterior.
+        """True se esta liga-season ja foi resolvida numa onda anterior.
 
-        Guard anti-poison: um cache n_matches=0 (season vazia) so e confiavel se
-        foi gravado pelo codigo CORRIGIDO (completed_at >= CACHE_EPOCH). Vazios
-        antigos podem ser false-empties do bug de selector/paginacao -> ignorados
-        para que a season seja re-listada. Completes reais (n_matches>0) sempre valem.
+        Guard anti-poison: vazio (n=0) so e confiavel se gravado pelo codigo
+        corrigido (completed_at >= CACHE_EPOCH). n!=0 (tem dados OU 404-conhecido)
+        sempre pula. Vazios antigos sao ignorados -> season re-listada.
         """
         row = self._con.execute(
             "SELECT n_matches, completed_at FROM season_state WHERE league_path=? AND season=?",
@@ -312,8 +323,6 @@ class SQLiteWriter:
             return False
         n_matches, completed_at = (row[0] or 0), (row[1] or "")
         if n_matches != 0:
-            # n>0 = tem dados; n<0 = slug quebrado/404 conhecido (nao re-tentar — so
-            # muda com correcao de slug, que e outra chave). Auditoria trata n<0 como gap.
             return True
         return completed_at >= CACHE_EPOCH
 
