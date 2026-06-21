@@ -164,9 +164,10 @@ jobs:
           SHARD_ID: ${{ matrix.shard }}
           TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
           DB_PATH_OVERRIDE: ${{ github.workspace }}/shard-${{ matrix.shard }}.db
-          # Graceful shutdown: o script para sozinho aos 330 min e grava shard_status.json,
-          # em vez de ser morto pelo timeout-minutes (350) perdendo trabalho in-flight.
-          TIME_BUDGET_MIN: '330'
+          # Graceful shutdown: o script para sozinho aos 315 min (margem ate o
+          # timeout-minutes de 350 p/ rodar checkpoint+upload e encerrar SUCCESS,
+          # nao CANCELLED). Combinado com o check de budget por-jogo no _process_match.
+          TIME_BUDGET_MIN: '315'
           STATUS_PATH: ${{ github.workspace }}/shard_status.json
         run: python astrology/scrapers/oddsportal/scrape_football_history.py
 
