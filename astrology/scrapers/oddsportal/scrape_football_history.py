@@ -775,10 +775,23 @@ async def main():
             all_leagues = [s for i, s in enumerate(all_leagues) if i % TOTAL_SHARDS == SHARD_ID]
             print(f"[shard {SHARD_ID}/{TOTAL_SHARDS}] {len(all_leagues)} torneios neste shard (antes de reordenar)")
 
-        # PRIORITY-FIRST: reordena dentro do shard por tier (Grand Slams primeiro).
-        # Garante que mesmo se o shard expirar no timeout, os torneios mais importantes
-        # ja foram processados. Dentro de cada tier, ordena alfabeticamente.
-        all_leagues.sort(key=lambda p: (_league_tier(p), p), reverse=PRIORITY_INVERT)
+        # COVERAGE-FIRST: ligas SEM dados no seed vao PRIMEIRO, pra cada onda atacar a
+        # CAUDA (tier 4/5, ITF, copas) em vez de re-andar o topo ja coberto. Sem isso o
+        # shard gastava o orcamento re-raspando a temporada atual das ligas do topo e
+        # nunca alcancava as ligas que faltam. Cobertas ficam por ultimo (puladas rapido
+        # pelo cache de season). Dentro disso, ordena por tier (invertido nos shards 7-9).
+        try:
+            _covered = {r[0] for r in writer._con.execute(
+                "SELECT DISTINCT l.path FROM events e JOIN leagues l ON e.league_id=l.id")}
+        except Exception:
+            _covered = set()
+        all_leagues.sort(key=lambda p: (
+            p in _covered,
+            -_league_tier(p) if PRIORITY_INVERT else _league_tier(p),
+            p,
+        ))
+        _n_unc = sum(1 for p in all_leagues if p not in _covered)
+        print(f"[priority] {_n_unc} sem-dados PRIMEIRO, {len(all_leagues)-_n_unc} cobertas depois")
         if DEBUG_LEAGUES:
             all_leagues = [lg for lg in all_leagues if _league_tier(lg) <= 1][:5]
             print(f"[DEBUG] Modo local — apenas {len(all_leagues)} ligas tier 0/1: {all_leagues}")
