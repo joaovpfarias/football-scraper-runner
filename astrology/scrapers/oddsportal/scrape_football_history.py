@@ -640,6 +640,11 @@ async def scrape_league(
                 tag = "404/quebrado" if _broken else ("200-vazio" if _valid_empty else "incerto")
                 print(f"  [vazio:{tag}] sem matches em {results_url} (http={_http})")
                 _empty_seasons += 1
+                # 404 = slug QUEBRADO (nao muda com a season). Cacheia broken em QUALQUER
+                # season — INCLUSIVE a atual/None — senao o listing 404 e re-tentado TODA
+                # onda, travando o avanco (slugs ruins do discovery re-raspados sem parar).
+                if _broken and _scraped_urls_count(str(writer.path), league_path, season_str) == 0:
+                    writer.mark_season_complete(league_path, season_str, -1)
                 if _season_is_final(suffix):
                     _consecutive_empty += 1
                     # Achado 2 guard: so marca como vazio se nao houver eventos ja gravados para esse ano.
