@@ -212,16 +212,24 @@ KNOWN_LEAGUES = [
     # --- Brasil ---
     "brazil/brasileirao-betano",
     "brazil/copa-do-brasil",
-    # --- America do Sul ---
-    "south-america/libertadores",
-    "south-america/sul-americana",
-    # --- Outras ligas principais ---
-    "netherlands/holanda",
+    # --- America do Sul (slugs PT verificados; 'libertadores'/'sul-americana' EN = 404) ---
+    "south-america/copa-libertadores",
+    "south-america/copa-sul-americana",
+    # --- Competicoes CONTINENTAIS (slugs PT verificados; os EN caf/afc/... davam 404) ---
+    "africa/liga-dos-campeoes-da-caf",
+    "africa/copa-das-nacoes-africanas",
+    "asia/liga-dos-campeoes-da-afc",
+    "asia/copa-da-asia",
+    "north-central-america/liga-dos-campeoes-da-concacaf",
+    "north-central-america/copa-ouro",
+    "world/copa-do-mundo",
+    # --- Outras ligas principais (slugs PT verificados) ---
+    "netherlands/eredivisie",      # 'holanda' EN = 404
     "portugal/primeira-liga",
     "turkey/super-lig",
     "russia/premier-league",
     "usa/mls",
-    "argentina/primera-division",
+    "argentina/liga-profesional",  # 'primera-division' EN = 404
 ]
 
 # ---------------------------------------------------------------------------
