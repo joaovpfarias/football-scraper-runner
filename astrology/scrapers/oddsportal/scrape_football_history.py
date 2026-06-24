@@ -7,12 +7,14 @@
 # Fase 3 (paralelo):  torneios rodam em paralelo (PARALLEL_LEAGUES ao mesmo tempo)
 
 import asyncio
+import gzip
 import json
 import os
 import re
 import sys
 import time
 import time as _time
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -335,12 +337,83 @@ async def _fetch_fresh(br: OddsPortalBrowser, url: str, wait_selector: str | Non
     return await br.fetch(url, wait_selector=wait_selector, settle=settle)
 
 
+_SITEMAP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
+
+def _fetch_xml(url: str) -> str:
+    """Busca um XML cru (sitemap) via HTTP. Descomprime gzip se necessario."""
+    req = urllib.request.Request(url, headers={"User-Agent": _SITEMAP_UA,
+                                               "Accept": "application/xml,text/xml,*/*"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read()
+    if data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
+    return data.decode("utf-8", "replace")
+
+
+def discover_leagues_from_sitemap(sport_slug: str) -> list[str]:
+    """Fonte AUTORITATIVA: le os sitemaps do oddsagora e retorna os slugs base
+    {pais}/{liga} das competicoes, ja nos nomes PT canonicos.
+
+    Substitui a raspagem flaky de paginas de indice (que gerava slugs EN -> 404,
+    ex: 'africa/caf-champions-league', e lixo malformado). O sitemap e XML estatico
+    e deterministico. Une 3 fontes (results + standings + tournament) p/ completude.
+    """
+    sources = [
+        f"{BASE_URL}/sitemap/{sport_slug}/results.xml",
+        f"{BASE_URL}/sitemap/{sport_slug}/standings.xml",
+        f"{BASE_URL}/sitemap/tournament.xml",
+    ]
+    raw: set[str] = set()
+    for src in sources:
+        try:
+            txt = _fetch_xml(src)
+        except Exception as e:
+            print(f"[sitemap] erro {src}: {e}")
+            continue
+        # Indice (aponta p/ sub-sitemaps, ex: results-1.xml) vs urlset direto.
+        subs = re.findall(r"<loc>\s*([^<]*sitemap[^<]*\.xml)\s*</loc>", txt)
+        bodies = []
+        if subs:
+            for s in subs:
+                try:
+                    bodies.append(_fetch_xml(s.strip()))
+                except Exception:
+                    pass
+        else:
+            bodies = [txt]
+        for body in bodies:
+            raw |= set(re.findall(
+                rf"/{sport_slug}/([a-z0-9-]+/[a-z0-9-]+)(?:/results/|/standings/|/)", body))
+
+    # Normaliza sufixo de SEASON (ano YYYY ou YYYY-YYYY) -> slug base, porque o
+    # scraper ja anexa SEASON_SUFFIXES. Preserva numeros genericos (mineiro-2, serie-c2).
+    def _base(slug: str) -> str:
+        return re.sub(r"-(19|20)\d{2}(-(19|20)\d{2})?$", "", slug)
+
+    out = sorted({_base(s) for s in raw})
+    print(f"[sitemap] {len(out)} competicoes (slugs PT) do sitemap de {sport_slug}")
+    return out
+
+
 async def discover_leagues(br: OddsPortalBrowser) -> list[str]:
     """
-    Raspa paginas do oddsagora.com.br para descobrir slugs reais de torneios.
-    Tenta multiplas URLs-fonte (resultados globais + pagina principal do esporte).
+    Descobre os slugs de torneios. FONTE PRIMARIA: sitemap do oddsagora (lista
+    autoritativa, slugs PT corretos, deterministica). Fallback: raspagem das
+    paginas de indice (metodo antigo) se o sitemap falhar/vier curto.
     """
-    slugs: set[str] = set()
+    try:
+        sm = discover_leagues_from_sitemap(SPORT_SLUG)
+    except Exception as e:
+        print(f"[sitemap] falhou completamente: {e}")
+        sm = []
+    if len(sm) >= 200:
+        print(f"[discovery] usando {len(sm)} slugs do sitemap (fonte autoritativa)")
+        return sm
+    print(f"[discovery] sitemap deu so {len(sm)} slugs — fallback p/ raspagem de indice")
+
+    slugs: set[str] = set(sm)
     discovery_urls = [
         f"{BASE_URL}/football/results/",
         f"{BASE_URL}/football/",
