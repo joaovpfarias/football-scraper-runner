@@ -744,8 +744,12 @@ async def scrape_league(
                     # Early-stop: apos EARLY_STOP_THRESHOLD vazios consecutivos acima de
                     # PROBE_CUTOFF, verifica ancoras historicas para decidir se a liga esta
                     # morta ou tem dados so em anos antigos.
-                    if _consecutive_empty >= EARLY_STOP_THRESHOLD and int(suffix) > PROBE_CUTOFF:
-                        anchors_to_probe = [y for y in ANCHOR_YEARS if y < int(suffix)]
+                    try:
+                        _sfx_end_year = int(str(suffix).split("-")[-1])
+                    except (TypeError, ValueError):
+                        _sfx_end_year = 0
+                    if _consecutive_empty >= EARLY_STOP_THRESHOLD and _sfx_end_year > PROBE_CUTOFF:
+                        anchors_to_probe = [y for y in ANCHOR_YEARS if y < _sfx_end_year]
                         found_anchor = None
                         for anchor_year in anchors_to_probe:
                             probe_url = url_builder.build_results_url(SPORT_SLUG, league_path, str(anchor_year))
