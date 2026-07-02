@@ -659,6 +659,22 @@ async def scrape_league(
     if _budget_exceeded():
         return {"league": league_path, "matches_total": 0, "empty_seasons": 0,
                 "skipped_cache": 0, "skipped_complete": 0, "skipped_budget": True}
+    # Slug morto: listing da season atual deu 404 numa onda anterior (n=-1 no
+    # season_state) e a liga nao tem nenhum evento no DB. 404 nao muda com a
+    # season — re-fetchar e desperdicio. Sem este skip, cada onda re-fetchava as
+    # seasons NAO-finais (atual + "2025-2026" + "2026") de cada liga morta
+    # (~3 fetches x ~20s por liga = ~2h/shard/onda so em 404).
+    try:
+        _row = writer._con.execute(
+            "SELECT n_matches FROM season_state WHERE league_path=? AND season=''",
+            (league_path,)).fetchone()
+        _root_broken = _row is not None and (_row[0] or 0) == -1
+    except Exception:
+        _root_broken = False
+    if _root_broken and _scraped_urls_count(str(writer.path), league_path, "") == 0:
+        print(f"[skip-broken] {league_path}: slug 404 em onda anterior — pulando liga")
+        return {"league": league_path, "matches_total": 0, "empty_seasons": 0,
+                "skipped_cache": 1, "skipped_complete": 0}
     async with league_sem:
         tier = _league_tier(league_path)
         _matches_total = 0
