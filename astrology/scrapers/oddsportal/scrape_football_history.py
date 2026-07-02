@@ -344,7 +344,8 @@ _SITEMAP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 def _fetch_xml(url: str) -> str:
     """Busca um XML cru (sitemap) via HTTP. Descomprime gzip se necessario."""
     req = urllib.request.Request(url, headers={"User-Agent": _SITEMAP_UA,
-                                               "Accept": "application/xml,text/xml,*/*"})
+                                               "Accept": "application/xml,text/xml,*/*",
+                                               "Accept-Language": "pt-BR,pt;q=0.9"})
     with urllib.request.urlopen(req, timeout=30) as r:
         data = r.read()
     if data[:2] == b"\x1f\x8b":
@@ -765,7 +766,9 @@ async def scrape_league(
                     except (TypeError, ValueError):
                         _sfx_end_year = 0
                     if _consecutive_empty >= EARLY_STOP_THRESHOLD and _sfx_end_year > PROBE_CUTOFF:
-                        anchors_to_probe = [y for y in ANCHOR_YEARS if y < _sfx_end_year]
+                        # 404 = slug quebrado deterministico: probar ancoras (ate 9
+                        # fetches x2 com retry) e desperdicio — vai direto ao bulk-cache -1.
+                        anchors_to_probe = [] if _broken else [y for y in ANCHOR_YEARS if y < _sfx_end_year]
                         found_anchor = None
                         for anchor_year in anchors_to_probe:
                             probe_url = url_builder.build_results_url(SPORT_SLUG, league_path, str(anchor_year))
