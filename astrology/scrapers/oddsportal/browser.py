@@ -230,6 +230,12 @@ class OddsPortalBrowser:
                         last_status = resp.status
                 except Exception:
                     continue
+                if last_status is not None and last_status >= 400:
+                    # 4xx deterministico (slug/season inexistente): nao ha game-row a
+                    # esperar nem retry util — sai ja. Corta ~50s por URL morta
+                    # (3 tentativas x 15s de wait + sleeps). Falso 404 de throttle em
+                    # hole-year e coberto pela amnistia de 3 dias no startup do scraper.
+                    return [], last_status
                 try:
                     await page.wait_for_selector(wait_selector, timeout=WAIT_TIMEOUT_MS)
                 except Exception:
