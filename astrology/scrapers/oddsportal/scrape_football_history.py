@@ -290,6 +290,22 @@ def _extract_league_slugs(html: str) -> set[str]:
 def load_discovered_leagues() -> list[str] | None:
     """Carrega slugs do cache JSON. Retorna None se inexistente, expirado ou vazio."""
     if os.environ.get("FORCE_DISCOVERY") == "1":
+        # Cache commitado FRESCO vence o FORCE_DISCOVERY: o discovery re-gerado no
+        # runner (IP EUA) recebe do sitemap slugs EN geo-alternates que 404am e
+        # queimam o budget (cobertura caiu de 60,7% para 42,7% quando o universo
+        # inflou 1.803->2.466 com lixo EN, mesmo bug ja corrigido no tennis-scraper).
+        # O JSON commitado (sitemap via IP BR, slugs PT puros) e a fonte
+        # autoritativa ate expirar o TTL.
+        try:
+            p = Path(DISCOVERY_CACHE_FILE)
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if (_time.time() - data.get("timestamp", 0) <= DISCOVERY_CACHE_TTL
+                    and data.get("leagues")):
+                print(f"[discovery] FORCE_DISCOVERY=1 mas cache commitado fresco "
+                      f"({len(data['leagues'])} slugs PT) — usando o cache")
+                return data["leagues"]
+        except Exception:
+            pass
         print("[discovery] FORCE_DISCOVERY=1 — ignorando cache, re-descobrindo do zero")
         return None
     try:
