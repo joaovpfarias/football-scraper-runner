@@ -882,6 +882,57 @@ async def main():
     skipped_budget: int = 0
     writer = SQLiteWriter(DB_PATH)
 
+    # ------------------------------------------------------------------
+    # Amnistia dinamica de hole-years (revisao 2026-07-10): liga COBERTA cujo
+    # intervalo de anos com eventos tem buraco, bloqueado por n<=0 (vazio/404)
+    # marcado ha mais de 3 dias -> apaga a marca p/ RE-TENTAR nesta onda.
+    # PROVADO ao vivo: campeonato-ingles-2020-2021 marcado 0 "confirmado" (throttle
+    # no runner rendeu 200 com grade vazia) tem 381 jogos no site; serie-b-2022
+    # idem (381); eredivisie-2021-2022 idem (325). A cadencia de 3 dias evita
+    # re-listar vazios REAIS (ex: ITF 404 legitimo) a cada onda.
+    # ------------------------------------------------------------------
+    try:
+        from datetime import timedelta
+        _cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _yrs_by_lg: dict[str, set[int]] = {}
+        for _path, _season in writer._con.execute(
+                "SELECT DISTINCT l.path, e.season FROM events e "
+                "JOIN leagues l ON e.league_id=l.id WHERE e.season != ''"):
+            _s = str(_season)
+            _y = None
+            if _s.isdigit():
+                _y = int(_s)
+            elif "-" in _s and _s.split("-")[-1].isdigit():
+                _y = int(_s.split("-")[-1])
+            if _y:
+                _yrs_by_lg.setdefault(_path, set()).add(_y)
+        _n_amn = 0
+        for _path, _yrs in _yrs_by_lg.items():
+            if not _yrs:
+                continue
+            _lo, _hi = min(_yrs), max(_yrs)
+            # buracos entre o primeiro e o ultimo ano com eventos
+            _targets = [_y for _y in range(_lo, _hi + 1) if _y not in _yrs]
+            # ratchet: 1 ano abaixo do minimo por passada. PROVADO ao vivo:
+            # campeonato-ingles-2015-2016 (pre-min) tem 381 jogos no site — o
+            # historico profundo existe e estava bloqueado por marcas falsas.
+            # Quando o ano destravado rende dados, o minimo desce e a proxima
+            # onda destrava o proximo — descida gradual e auto-limitada ate 1998.
+            if _lo - 1 >= 1998:
+                _targets.append(_lo - 1)
+            for _y in _targets:
+                for _sfx in (str(_y), f"{_y-1}-{_y}"):
+                    _cur = writer._con.execute(
+                        "DELETE FROM season_state WHERE league_path=? AND season=? "
+                        "AND n_matches<=0 AND completed_at < ?",
+                        (_path, _sfx, _cutoff))
+                    _n_amn += _cur.rowcount
+        writer._con.commit()
+        if _n_amn:
+            print(f"[amnistia] {_n_amn} bloqueios de hole-years removidos — re-tentando nesta onda")
+    except Exception as _e:
+        print(f"[amnistia] erro (nao-fatal): {_e}")
+
     async with OddsPortalBrowser(headful=False, concurrency=BROWSER_POOL) as br:
 
         # --- Fase 1: discovery de torneios reais ---
