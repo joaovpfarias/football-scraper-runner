@@ -871,6 +871,47 @@ async def scrape_league(
 # Main
 # ---------------------------------------------------------------------------
 
+
+def _amnesty(writer, cutoff_iso: str, include_root: bool) -> int:
+    """Remove marcas n<=0 do season_state p/ re-tentativa: anos-buraco + ratchet
+    pre-min de ligas cobertas; opcionalmente as marcas de raiz (season='').
+    Retorna quantas linhas removeu."""
+    _yrs_by_lg: dict[str, set[int]] = {}
+    for _path, _season in writer._con.execute(
+            "SELECT DISTINCT l.path, e.season FROM events e "
+            "JOIN leagues l ON e.league_id=l.id WHERE e.season != ''"):
+        _s = str(_season)
+        _y = None
+        if _s.isdigit():
+            _y = int(_s)
+        elif "-" in _s and _s.split("-")[-1].isdigit():
+            _y = int(_s.split("-")[-1])
+        if _y:
+            _yrs_by_lg.setdefault(_path, set()).add(_y)
+    _n = 0
+    for _path, _yrs in _yrs_by_lg.items():
+        if not _yrs:
+            continue
+        _lo, _hi = min(_yrs), max(_yrs)
+        _targets = [_y for _y in range(_lo, _hi + 1) if _y not in _yrs]
+        if _lo - 1 >= 1998:
+            _targets.append(_lo - 1)
+        for _y in _targets:
+            for _sfx in (str(_y), f"{_y-1}-{_y}"):
+                _n += writer._con.execute(
+                    "DELETE FROM season_state WHERE league_path=? AND season=? "
+                    "AND n_matches<=0 AND completed_at < ?",
+                    (_path, _sfx, cutoff_iso)).rowcount
+    if include_root:
+        # Reabre ligas marcadas mortas na raiz (skip-broken): em janela boa o
+        # 404 falso de throttle se desfaz; 404 real re-marca em ~3s (fast-exit).
+        _n += writer._con.execute(
+            "DELETE FROM season_state WHERE season='' AND n_matches<0 "
+            "AND completed_at < ?", (cutoff_iso,)).rowcount
+    writer._con.commit()
+    return _n
+
+
 async def main():
     print("=" * 60)
     print("Football Full History Scraper")
@@ -882,56 +923,6 @@ async def main():
     skipped_budget: int = 0
     writer = SQLiteWriter(DB_PATH)
 
-    # ------------------------------------------------------------------
-    # Amnistia dinamica de hole-years (revisao 2026-07-10): liga COBERTA cujo
-    # intervalo de anos com eventos tem buraco, bloqueado por n<=0 (vazio/404)
-    # marcado ha mais de 3 dias -> apaga a marca p/ RE-TENTAR nesta onda.
-    # PROVADO ao vivo: campeonato-ingles-2020-2021 marcado 0 "confirmado" (throttle
-    # no runner rendeu 200 com grade vazia) tem 381 jogos no site; serie-b-2022
-    # idem (381); eredivisie-2021-2022 idem (325). A cadencia de 3 dias evita
-    # re-listar vazios REAIS (ex: ITF 404 legitimo) a cada onda.
-    # ------------------------------------------------------------------
-    try:
-        from datetime import timedelta
-        _cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _yrs_by_lg: dict[str, set[int]] = {}
-        for _path, _season in writer._con.execute(
-                "SELECT DISTINCT l.path, e.season FROM events e "
-                "JOIN leagues l ON e.league_id=l.id WHERE e.season != ''"):
-            _s = str(_season)
-            _y = None
-            if _s.isdigit():
-                _y = int(_s)
-            elif "-" in _s and _s.split("-")[-1].isdigit():
-                _y = int(_s.split("-")[-1])
-            if _y:
-                _yrs_by_lg.setdefault(_path, set()).add(_y)
-        _n_amn = 0
-        for _path, _yrs in _yrs_by_lg.items():
-            if not _yrs:
-                continue
-            _lo, _hi = min(_yrs), max(_yrs)
-            # buracos entre o primeiro e o ultimo ano com eventos
-            _targets = [_y for _y in range(_lo, _hi + 1) if _y not in _yrs]
-            # ratchet: 1 ano abaixo do minimo por passada. PROVADO ao vivo:
-            # campeonato-ingles-2015-2016 (pre-min) tem 381 jogos no site — o
-            # historico profundo existe e estava bloqueado por marcas falsas.
-            # Quando o ano destravado rende dados, o minimo desce e a proxima
-            # onda destrava o proximo — descida gradual e auto-limitada ate 1998.
-            if _lo - 1 >= 1998:
-                _targets.append(_lo - 1)
-            for _y in _targets:
-                for _sfx in (str(_y), f"{_y-1}-{_y}"):
-                    _cur = writer._con.execute(
-                        "DELETE FROM season_state WHERE league_path=? AND season=? "
-                        "AND n_matches<=0 AND completed_at < ?",
-                        (_path, _sfx, _cutoff))
-                    _n_amn += _cur.rowcount
-        writer._con.commit()
-        if _n_amn:
-            print(f"[amnistia] {_n_amn} bloqueios de hole-years removidos — re-tentando nesta onda")
-    except Exception as _e:
-        print(f"[amnistia] erro (nao-fatal): {_e}")
 
     async with OddsPortalBrowser(headful=False, concurrency=BROWSER_POOL) as br:
 
@@ -946,6 +937,38 @@ async def main():
             print(f"\n[discover-only] {len(discovered)} slugs salvos. Saindo.")
             writer.close()
             return
+
+        # ------------------------------------------------------------------
+        # CANARIO de janela (2026-07-11): o site serve grade VAZIA (200) para o
+        # runner de forma INTERMITENTE (dias com 8-12k eventos arquivados raspados
+        # alternam com dias ~0; provado que campeonato-ingles-2020-2021 "vazio
+        # confirmado" tem 381 jogos). Testa 2 listagens arquivadas SABIDAMENTE com
+        # dados: se renderizam -> janela BOA -> amnistia agressiva (re-tenta tudo
+        # que esta bloqueado agora, inclusive ligas mortas na raiz). Se vazias ->
+        # janela RUIM -> amnistia conservadora (cadencia 3d) e nada de desperdicar
+        # budget re-listando vazios falsos.
+        # ------------------------------------------------------------------
+        from datetime import timedelta
+        _canary_ok = False
+        for _cu in ['https://www.oddsagora.com.br/football/france/ligue-1-2023-2024/results/', 'https://www.oddsagora.com.br/football/germany/bundesliga-2023-2024/results/']:
+            try:
+                _pgs, _st = await br.fetch_listing_pages(_cu, wait_selector=LISTING_WAIT_SELECTOR)
+                if any('data-testid="game-row"' in _h for _h in _pgs):
+                    _canary_ok = True
+                    break
+            except Exception:
+                pass
+        try:
+            if _canary_ok:
+                _cut = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                _na = _amnesty(writer, _cut, include_root=True)
+                print(f"[canario] janela BOA — amnistia agressiva: {_na} bloqueios removidos")
+            else:
+                _cut = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                _na = _amnesty(writer, _cut, include_root=False)
+                print(f"[canario] janela RUIM — amnistia conservadora (3d): {_na} removidos")
+        except Exception as _e:
+            print(f"[amnistia] erro (nao-fatal): {_e}")
 
         # Merge: torneios descobertos + KNOWN_LEAGUES (complemento historico)
         all_leagues = sorted(set(discovered) | set(KNOWN_LEAGUES))
