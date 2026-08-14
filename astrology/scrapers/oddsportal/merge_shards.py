@@ -271,6 +271,12 @@ def main():
         final["seasons_cached"] = 0
         final["seasons_empty"]  = 0
     main_con.execute("PRAGMA optimize")
+    # Checkpoint WAL->main antes de fechar: sem isso, o .db publicado no release
+    # pode ficar sem as ultimas escritas (o publish so sobe o .db, nao o -wal/-shm
+    # que o SQLite mantem em modo WAL). Mesmo checkpoint que ja existe por-shard,
+    # faltava para o arquivo FINAL mergeado (causa suspeita da corrupcao
+    # 'database disk image is malformed' vista no release em 2026-08-06).
+    main_con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     main_con.close()
 
     print("\n[merge] Concluido!")
