@@ -127,7 +127,11 @@ def _season_is_final(suffix) -> bool:
     except (TypeError, ValueError, AttributeError):
         return False
 
-PARALLEL_LEAGUES  = 4   # ligas em paralelo por shard (4 ligas × 7 matches = 28 pages total)
+# Configuravel via env p/ teste A/B controlado (2026-08-10): shard 0 roda com
+# valor maior para validar se o pool de 28 paginas (hoje sub-utilizado na fase
+# de listagem) aguenta mais concorrencia sem degradar o runner de 4 vCPU/16GB.
+# Default 4 mantido para os demais shards ate o teste confirmar seguranca.
+PARALLEL_LEAGUES  = int(os.environ.get("PARALLEL_LEAGUES_OVERRIDE", "4"))  # ligas em paralelo por shard
 PARALLEL_MATCHES  = 7   # matches em paralelo por liga — semaforo GLOBAL (compartilhado entre ligas)
 BROWSER_POOL      = 28  # paginas Chromium no pool
 USE_CACHE         = True
