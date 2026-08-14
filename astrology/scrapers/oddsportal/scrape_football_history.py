@@ -127,11 +127,16 @@ def _season_is_final(suffix) -> bool:
     except (TypeError, ValueError, AttributeError):
         return False
 
-# Configuravel via env p/ teste A/B controlado (2026-08-10): shard 0 roda com
-# valor maior para validar se o pool de 28 paginas (hoje sub-utilizado na fase
-# de listagem) aguenta mais concorrencia sem degradar o runner de 4 vCPU/16GB.
-# Default 4 mantido para os demais shards ate o teste confirmar seguranca.
-PARALLEL_LEAGUES  = int(os.environ.get("PARALLEL_LEAGUES_OVERRIDE", "4"))  # ligas em paralelo por shard
+# Teste A/B controlado (2026-08-10): so o SHARD_ID==0 roda com concorrencia
+# de listagem maior (4->8), os demais mantem o default. Objetivo: validar se
+# o pool de 28 paginas (hoje sub-utilizado na fase de listagem -- listagens
+# vazias custam ~51s cada e so 4 rodam por vez) aguenta mais concorrencia sem
+# degradar o runner de 4 vCPU/16GB antes de propagar pra todos os shards.
+# Decidido pelo proprio SHARD_ID (sem depender de mudanca no workflow YAML,
+# que o PAT atual nao tem escopo p/ editar). Override manual via env continua
+# disponivel p/ testes locais.
+_PARALLEL_LEAGUES_DEFAULT = 8 if SHARD_ID == 0 else 4
+PARALLEL_LEAGUES  = int(os.environ.get("PARALLEL_LEAGUES_OVERRIDE", str(_PARALLEL_LEAGUES_DEFAULT)))  # ligas em paralelo por shard
 PARALLEL_MATCHES  = 7   # matches em paralelo por liga — semaforo GLOBAL (compartilhado entre ligas)
 BROWSER_POOL      = 28  # paginas Chromium no pool
 USE_CACHE         = True
