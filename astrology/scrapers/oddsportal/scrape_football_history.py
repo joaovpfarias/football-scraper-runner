@@ -677,6 +677,44 @@ async def _process_match(
 # Processar um torneio (todas as seasons)
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Instrumentacao da curva de sucesso (2026-08-26)
+# ---------------------------------------------------------------------------
+# Decide, com dado e nao com achismo, se UM IP residencial aguenta o volume todo
+# ou se e preciso pool rotativo pago: se a taxa de sucesso cair conforme o volume
+# acumulado sobe, e bloqueio por VOLUME (precisa rotacionar); se ficar plana, e
+# bloqueio por CLASSE de IP (datacenter vs residencial) e 1 IP basta.
+# So conta listagens de season ARQUIVADA -- a season atual nunca foi bloqueada,
+# incluir ela mascararia a curva.
+_LISTING_STATS = {"ok": 0, "empty200": 0, "http404": 0, "incerto": 0, "_last": 0}
+
+
+def _record_listing(outcome: str, suffix) -> None:
+    if not _season_is_final(suffix):
+        return
+    _LISTING_STATS[outcome] = _LISTING_STATS.get(outcome, 0) + 1
+    tot = sum(v for k, v in _LISTING_STATS.items() if not k.startswith("_"))
+    if tot - _LISTING_STATS["_last"] >= 500:
+        _LISTING_STATS["_last"] = tot
+        _el = (time.monotonic() - _START_MONOTONIC) / 60
+        _ok = _LISTING_STATS["ok"]
+        print(f"[curva] arquivadas={tot} ok={_ok} ({100*_ok/tot:.1f}%) "
+              f"vazio200={_LISTING_STATS['empty200']} 404={_LISTING_STATS['http404']} "
+              f"incerto={_LISTING_STATS['incerto']} t+{_el:.0f}min", flush=True)
+
+
+def _report_listing_curve() -> None:
+    tot = sum(v for k, v in _LISTING_STATS.items() if not k.startswith("_"))
+    if not tot:
+        print("[curva] nenhuma listagem arquivada tentada nesta onda")
+        return
+    _ok = _LISTING_STATS["ok"]
+    print(f"[curva-final] shard={SHARD_ID} arquivadas={tot} "
+          f"ok={_ok} ({100*_ok/tot:.1f}%) vazio200={_LISTING_STATS['empty200']} "
+          f"404={_LISTING_STATS['http404']} incerto={_LISTING_STATS['incerto']}")
+
+
 async def scrape_league(
     br: OddsPortalBrowser, league_path: str, writer: SQLiteWriter,
     league_sem: asyncio.Semaphore, match_sem: asyncio.Semaphore,
@@ -760,6 +798,7 @@ async def scrape_league(
             _pag_ok = True
 
             if not all_matches:
+                _record_listing("http404" if _broken else ("empty200" if _valid_empty else "incerto"), suffix)
                 tag = "404/quebrado" if _broken else ("200-vazio" if _valid_empty else "incerto")
                 print(f"  [vazio:{tag}] sem matches em {results_url} (http={_http})")
                 _empty_seasons += 1
@@ -828,6 +867,7 @@ async def scrape_league(
                             break
                 continue
 
+            _record_listing("ok", suffix)
             _consecutive_empty = 0
             # Checkpoint por jogo: pula apenas os ja completos (score + home_away odds)
             done_urls = _scraped_urls(str(writer.path), league_path, season_str)
@@ -984,6 +1024,28 @@ async def main():
         print(f"\n[info] {len(discovered)} descobertos + {len(KNOWN_LEAGUES)} conhecidos = {len(all_leagues)} torneios unicos")
 
         # Sharding (GitHub Actions matrix): divide a lista global entre shards
+        # DISTRIBUICAO DE TRABALHO (2026-08-26): remove ligas SEM trabalho ANTES de
+        # fatiar entre os shards. Antes, o `i % TOTAL_SHARDS` fatiava a lista BRUTA,
+        # entao conforme as ligas se esgotavam o trabalho vivo se concentrava em
+        # poucos shards -- medido na run 32970359502: 6 de 10 shards terminavam em
+        # ~1.6min (todas as ligas ja cacheadas) enquanto 4 queimavam os 315min.
+        # Paralelismo efetivo era 4/10. Criterio de "morta" e o MESMO do skip-broken
+        # em scrape_league: raiz marcada 404 (n=-1, season='') e zero eventos no DB.
+        try:
+            _dead = {r[0] for r in writer._con.execute(
+                "SELECT s.league_path FROM season_state s "
+                "WHERE s.season='' AND s.n_matches < 0 "
+                "AND NOT EXISTS (SELECT 1 FROM events e JOIN leagues l "
+                "                ON e.league_id = l.id WHERE l.path = s.league_path)")}
+        except Exception as _e:
+            print(f"[work-filter] erro (nao-fatal): {_e}")
+            _dead = set()
+        if _dead:
+            _before = len(all_leagues)
+            all_leagues = [p for p in all_leagues if p not in _dead]
+            print(f"[work-filter] {_before - len(all_leagues)} ligas de slug morto removidas "
+                  f"antes do sharding; {len(all_leagues)} restam p/ distribuir entre os shards")
+
         if TOTAL_SHARDS > 1:
             all_leagues = [s for i, s in enumerate(all_leagues) if i % TOTAL_SHARDS == SHARD_ID]
             print(f"[shard {SHARD_ID}/{TOTAL_SHARDS}] {len(all_leagues)} torneios neste shard (antes de reordenar)")
@@ -1037,6 +1099,7 @@ async def main():
         seasons_skipped_cache = sum(r.get("skipped_cache", 0) for r in results if isinstance(r, dict))
         print(f"\n[resumo] Ligas com dados: {leagues_with_data} | Ligas vazias: {leagues_empty} | Budget-skip: {skipped_budget} | Seasons puladas por cache: {seasons_skipped_cache}")
 
+    _report_listing_curve()
     stats = writer.stats()
     writer.close()
     print("\n\nConcluido!")
