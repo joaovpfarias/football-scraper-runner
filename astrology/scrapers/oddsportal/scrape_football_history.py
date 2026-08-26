@@ -137,8 +137,11 @@ def _season_is_final(suffix) -> bool:
 # disponivel p/ testes locais.
 _PARALLEL_LEAGUES_DEFAULT = 8 if SHARD_ID == 0 else 4
 PARALLEL_LEAGUES  = int(os.environ.get("PARALLEL_LEAGUES_OVERRIDE", str(_PARALLEL_LEAGUES_DEFAULT)))  # ligas em paralelo por shard
-PARALLEL_MATCHES  = 7   # matches em paralelo por liga — semaforo GLOBAL (compartilhado entre ligas)
-BROWSER_POOL      = 28  # paginas Chromium no pool
+PARALLEL_MATCHES  = int(os.environ.get("PARALLEL_MATCHES_OVERRIDE", "7"))   # semaforo GLOBAL de matches
+# Pool de paginas Chromium. 28 e dimensionado p/ runner Azure (4 vCPU dedicados).
+# Em self-hosted (maquina compartilhada com o usuario) use BROWSER_POOL_OVERRIDE=10
+# ou menos: cada pagina custa ~50-100MB de RAM e concorre por CPU com o desktop.
+BROWSER_POOL      = int(os.environ.get("BROWSER_POOL_OVERRIDE", "28"))
 USE_CACHE         = True
 PAGE_FULL         = 40  # se a pg1 trouxe >= isso, provavelmente ha mais paginas
 MAX_RESULT_PAGES  = 25  # teto de paginas de resultado por season
