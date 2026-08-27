@@ -73,7 +73,11 @@ def parse(html: str, base_url: str = BASE_URL) -> list[dict]:
         ep = el.select_one('[data-testid="event-participants"]')
         teams = []
         if ep:
-            for p in ep.select(".participant-name"):
+            # 2026-08: o site trocou a CLASSE .participant-name por
+            # data-testid="participant-name". Aceita as duas formas -- sem isso
+            # o parser descarta 100% dos jogos (len(teams)<2) e a listagem inteira
+            # volta vazia, o que fazia o scraper parecer "bloqueado".
+            for p in ep.select('.participant-name, [data-testid="participant-name"]'):
                 t = normalize_team_name(p.get_text())
                 if t:
                     teams.append(t)
