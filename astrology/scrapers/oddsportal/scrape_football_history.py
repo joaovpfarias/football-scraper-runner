@@ -340,6 +340,12 @@ def load_discovered_leagues() -> list[str] | None:
 
 
 def save_discovered_leagues(leagues: list[str]) -> None:
+    # NUNCA sobrescrever um cache bom com resultado vazio. Em 26/ago o gate
+    # 18+ fez o discovery retornar 0 slugs e o save apagou o cache PT de 1.803
+    # ligas -- a onda seguinte rodou com 25 ligas (so as KNOWN_LEAGUES).
+    if not leagues:
+        print("[discovery] resultado VAZIO — preservando cache existente (nao sobrescreve)")
+        return
     try:
         p = Path(DISCOVERY_CACHE_FILE)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -371,9 +377,12 @@ _SITEMAP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def _fetch_xml(url: str) -> str:
     """Busca um XML cru (sitemap) via HTTP. Descomprime gzip se necessario."""
+    # age_verified: ver nota do gate 18+ em browser.py. Sem o cookie o sitemap
+    # volta como pagina de verificacao (11.650 bytes) e o discovery da 0 slugs.
     req = urllib.request.Request(url, headers={"User-Agent": _SITEMAP_UA,
                                                "Accept": "application/xml,text/xml,*/*",
-                                               "Accept-Language": "pt-BR,pt;q=0.9"})
+                                               "Accept-Language": "pt-BR,pt;q=0.9",
+                                               "Cookie": "age_verified=1"})
     with urllib.request.urlopen(req, timeout=30) as r:
         data = r.read()
     if data[:2] == b"\x1f\x8b":
