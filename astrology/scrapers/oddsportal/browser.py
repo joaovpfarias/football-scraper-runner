@@ -12,6 +12,7 @@ Uso:
 import asyncio
 import os
 import random
+import re
 from contextlib import asynccontextmanager
 
 from playwright.async_api import async_playwright
@@ -73,6 +74,19 @@ class OddsPortalBrowser:
             timezone_id="UTC",
             viewport={"width": 1366, "height": 900},
         )
+        # Gate de verificacao de idade (regulacao BR, ago/2026): o site intercepta
+        # TODAS as respostas para visitantes do Brasil -- inclusive o sitemap XML --
+        # com uma pagina de autodeclaracao 18+ (canonical /brazil.html, 11.650 bytes
+        # identicos em qualquer URL). O cookie abaixo e o equivalente a clicar
+        # "sou maior de 18" uma vez; sem ele nenhum IP brasileiro ve conteudo.
+
+        try:
+            await ctx.add_cookies([{
+                "name": "age_verified", "value": "1",
+                "domain": ".oddsagora.com.br", "path": "/",
+            }])
+        except Exception:
+            pass
         page = await ctx.new_page()
 
         # Bloqueia imagens/midia/fontes (nao afetam o DOM que parseamos) — reduz
@@ -183,7 +197,22 @@ class OddsPortalBrowser:
             return await page.content()
 
     async def _click_pagination(self, page, text: str) -> bool:
-        """Clica num controle de paginacao cujo texto == `text`. True se clicou."""
+        """Clica num controle de paginacao cujo texto == `text`. True se clicou.
+
+        2026-08: o site trocou os links de pagina (<a>N</a> + "Próximo") por
+        <button>N</button> + "Next". Alem disso `[class*=pagination]` passou a
+        casar com classes Tailwind responsivas de OUTROS blocos (ex:
+        "pagination-sx:mr-5" no header de busca), poluindo a varredura. Por isso
+        tenta primeiro role=button com texto exato, e so depois cai no metodo
+        antigo (que ainda cobre markup legado).
+        """
+        try:
+            loc = page.get_by_role("button", name=text, exact=True)
+            if await loc.count():
+                await loc.first.click(timeout=5000)
+                return True
+        except Exception:
+            pass
         try:
             els = await page.query_selector_all('[class*=pagination] *')
         except Exception:
@@ -245,11 +274,17 @@ class OddsPortalBrowser:
                 if 'data-testid="game-row"' in first_html:
                     # Tem dados — pagina nesta mesma sessao de pagina
                     htmls.append(first_html)
+                    # Termino por CONTEUDO, nao so por botao: apos o markup novo
+                    # (2026-08) o loop clicava ate max_pages e repetia paginas --
+                    # 60 fetches para 260 jogos unicos. Se uma pagina nao traz
+                    # nenhum href novo, a paginacao acabou (ou travou): para.
+                    _seen_hrefs = set(re.findall(r'href="(/[^"]*?/h2h/[^"]+)"', first_html))
                     n = 2
                     while n <= max_pages:
                         clicked = await self._click_pagination(page, str(n))
                         if not clicked:
-                            clicked = (await self._click_pagination(page, "Próximo")
+                            clicked = (await self._click_pagination(page, "Next")
+                                       or await self._click_pagination(page, "Próximo")
                                        or await self._click_pagination(page, "Proximo"))
                             if not clicked:
                                 break
@@ -257,8 +292,20 @@ class OddsPortalBrowser:
                             await page.wait_for_selector(wait_selector, timeout=WAIT_TIMEOUT_MS)
                         except Exception:
                             pass
-                        await asyncio.sleep(random.uniform(1.0, 1.5))
-                        htmls.append(await page.content())
+                        # Espera o conteudo REALMENTE trocar apos o clique. Um sleep
+                        # fixo capturava a pagina antiga (sem hrefs novos) e o loop
+                        # encerrava cedo -- Ligue 1 parava em 150 de ~306 jogos.
+                        _h, _new = "", set()
+                        for _ in range(16):          # ate ~8s
+                            await asyncio.sleep(0.5)
+                            _h = await page.content()
+                            _new = set(re.findall(r'href="(/[^"]*?/h2h/[^"]+)"', _h)) - _seen_hrefs
+                            if _new:
+                                break
+                        if not _new:
+                            break                    # paginacao esgotada de fato
+                        _seen_hrefs |= _new
+                        htmls.append(_h)
                         n += 1
                     return htmls, last_status
             # pg1 sem game-row: backoff e re-tenta (pode ser throttle/lentidao)
