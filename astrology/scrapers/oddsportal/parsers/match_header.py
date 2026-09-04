@@ -36,17 +36,15 @@ def parse(html: str) -> dict:
     home = normalize_team_name(host_el.get_text()  if host_el  else "")
     away = normalize_team_name(guest_el.get_text() if guest_el else "")
 
-    # Fallback: breadcrumb
-    if not (home and away):
-        bc = soup.select_one('[data-testid="breadcrumb-current-page"]')
-        if bc:
-            txt = bc.get_text(" ", strip=True)
-            for sep in [" - ", " – ", " vs ", " v "]:
-                if sep in txt:
-                    parts = txt.split(sep, 1)
-                    home = normalize_team_name(parts[0])
-                    away = normalize_team_name(parts[1])
-                    break
+    # Fallback: breadcrumb (DESATIVADO 2026-09-04 -- bug real, ~24k eventos
+    # afetados no futebol). O breadcrumb tipico e a trilha de navegacao
+    # "Futebol > Espanha > Tercera RFEF > Group 1 2025/2026", NAO os 2 times.
+    # O split ingenuo por " - " pegava competicao/subgrupo como se fossem
+    # nomes de time (ex: home="Tercera RFEF", away="Group 1 2025/2026") -- e
+    # por serem strings NAO-VAZIAS, ganhavam do fallback correto em
+    # _process_match() (`header.get("home") or m.get("home")`), que teria
+    # usado o nome real ja extraido corretamente pela listagem. Sem fallback
+    # aqui, home/away ficam vazios e o `or` cai no valor certo da listagem.
 
     # Horario
     gt = soup.select_one('[data-testid="game-time-item"]')
