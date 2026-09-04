@@ -9,9 +9,36 @@ Seletores (2026-05):
                                    Para esportes com placar simples (futebol/basquete):
                                    texto livre com padrao "N - N" ou "N:N"
 """
+import json
 import re
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from ..normalizer import normalize_team_name, parse_pt_datetime
+
+def _extract_jsonld_event(html: str) -> dict | None:
+    """Extrai o bloco JSON-LD schema.org SportsEvent (2026-09-04): mais
+    robusto que os seletores data-testid (que o site ja trocou mais de uma
+    vez durante esta investigacao -- ver participant-name/game-row).
+    Da startDate (ISO com timezone), homeTeam/awayTeam.name, e pais da sede.
+    """
+    for blk in re.findall(r'<script type="application/ld\+json">(.*?)</script>', html, re.S):
+        try:
+            d = json.loads(blk)
+        except Exception:
+            continue
+        if "SportsEvent" in str(d.get("@type", "")):
+            return d
+    return None
+
+
+def _jsonld_iso_utc(start_date: str) -> str:
+    """'2026-08-25T13:00:00+02:00' -> '2026-08-25T11:00:00+00:00' (UTC)."""
+    try:
+        dt = datetime.fromisoformat(start_date)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    except Exception:
+        return ""
+
 
 
 def _parse_partials(paren_text: str) -> tuple:
@@ -30,11 +57,21 @@ def _parse_partials(paren_text: str) -> tuple:
 def parse(html: str) -> dict:
     soup = BeautifulSoup(html, "lxml")
 
-    # Times
-    host_el  = soup.select_one('[data-testid="game-host"]')
-    guest_el = soup.select_one('[data-testid="game-guest"]')
-    home = normalize_team_name(host_el.get_text()  if host_el  else "")
-    away = normalize_team_name(guest_el.get_text() if guest_el else "")
+    jsonld = _extract_jsonld_event(html)
+
+    # Times: JSON-LD primeiro (mais robusto -- schema.org e padrao estavel de
+    # SEO, sofre bem menos com redesigns de UI que os data-testid, que o site
+    # ja trocou 2x durante esta investigacao). Cai pro seletor antigo se
+    # ausente.
+    home, away = "", ""
+    if jsonld:
+        home = normalize_team_name(jsonld.get("homeTeam", {}).get("name", "") or "")
+        away = normalize_team_name(jsonld.get("awayTeam", {}).get("name", "") or "")
+    if not (home and away):
+        host_el  = soup.select_one('[data-testid="game-host"]')
+        guest_el = soup.select_one('[data-testid="game-guest"]')
+        home = home or normalize_team_name(host_el.get_text()  if host_el  else "")
+        away = away or normalize_team_name(guest_el.get_text() if guest_el else "")
 
     # Fallback: breadcrumb (DESATIVADO 2026-09-04 -- bug real, ~24k eventos
     # afetados no futebol). O breadcrumb tipico e a trilha de navegacao
@@ -46,17 +83,32 @@ def parse(html: str) -> dict:
     # usado o nome real ja extraido corretamente pela listagem. Sem fallback
     # aqui, home/away ficam vazios e o `or` cai no valor certo da listagem.
 
-    # Horario
-    gt = soup.select_one('[data-testid="game-time-item"]')
+    # Horario: JSON-LD primeiro (25,8% do tenis / 17,9% do futebol tinham
+    # 'T00:00:00' de placeholder porque [data-testid="game-time-item"] some
+    # da pagina -- confirmado ao vivo em 2026-09-04, o site removeu TODOS os
+    # data-testid das paginas de partida. JSON-LD sobrevive porque e um
+    # padrao de dados estruturados diferente do CSS-in-JS interno.)
     iso = ""
-    if gt:
-        iso = parse_pt_datetime(gt.get_text(" ", strip=True)) or ""
+    if jsonld and jsonld.get("startDate"):
+        iso = _jsonld_iso_utc(jsonld["startDate"])
+    if not iso:
+        gt = soup.select_one('[data-testid="game-time-item"]')
+        if gt:
+            iso = parse_pt_datetime(gt.get_text(" ", strip=True)) or ""
 
-    score_home, score_away, status, partials = "", "", "scheduled", ""
-    score_home_ht, score_away_ht = "", ""
-    score_home_2h, score_away_2h = "", ""
+    # Pais da sede: JSON-LD tem location.address.addressCountry quando
+    # disponivel (nem sempre populado, mas quando esta e mais confiavel que
+    # inferir do slug da liga).
+    venue_country = ""
+    if jsonld:
+        venue_country = (jsonld.get("location", {}) or {}).get("address", {}).get("addressCountry", "") or ""
 
     # Placar via live-info: "Resultado final <strong>2:1</strong> (sets detail)"
+    status = "scheduled"
+    score_home = score_away = ""
+    score_home_ht = score_away_ht = ""
+    score_home_2h = score_away_2h = ""
+    partials = ""
     li = soup.select_one('[data-testid="live-info"]')
     if li:
         # Score final: extrai do <strong>
@@ -128,7 +180,7 @@ def parse(html: str) -> dict:
         "away": away,
         "venue": "",
         "venue_city": "",
-        "venue_country": "",
+        "venue_country": venue_country,
         "score_home":    score_home,
         "score_away":    score_away,
         "score_home_ht": score_home_ht,
