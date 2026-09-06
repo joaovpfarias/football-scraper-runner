@@ -50,7 +50,7 @@ ODDS_WAIT_SELECTOR = '[data-testid="over-under-expanded-row"], [data-testid="nav
 # `a[href*="/<sport>/"]` que casa com links do MENU instantaneamente -> fetch
 # retornava ~0.5s ANTES das linhas renderizarem (JS) -> 0 matches -> season
 # falsamente cacheada como vazia. Esperar a game-row de fato corrige a cobertura.
-LISTING_WAIT_SELECTOR = '[data-testid="game-row"]'
+LISTING_WAIT_SELECTOR = 'a[href*="/h2h/"]'  # 2026-09-06: data-testid sumiu do site inteiro; href de h2h e o marcador estavel que sobrou
 
 
 class OddsPortalBrowser:
@@ -271,7 +271,7 @@ class OddsPortalBrowser:
                     pass
                 await asyncio.sleep(random.uniform(0.4, 0.7))
                 first_html = await page.content()
-                if 'data-testid="game-row"' in first_html:
+                if re.search(r'href="[^"]*?/h2h/', first_html):  # 2026-09-06: data-testid removido do site; href de h2h e o sinal de tem-jogos que sobrou
                     # Tem dados — pagina nesta mesma sessao de pagina
                     htmls.append(first_html)
                     # Termino por CONTEUDO, nao so por botao: apos o markup novo
@@ -279,6 +279,13 @@ class OddsPortalBrowser:
                     # 60 fetches para 260 jogos unicos. Se uma pagina nao traz
                     # nenhum href novo, a paginacao acabou (ou travou): para.
                     _seen_hrefs = set(re.findall(r'href="(/[^"]*?/h2h/[^"]+)"', first_html))
+                    # 2026-09-06: o botao de paginacao so fica interativo alguns
+                    # segundos apos a hidratacao (confirmado ao vivo: clique aos
+                    # ~1s registra como bem-sucedido mas nao muda nada -- nem uma
+                    # requisicao de rede dispara; aos ~5s de espera pre-clique,
+                    # funciona). Sem essa espera, TODA paginacao falhava
+                    # silenciosamente (so a pagina 1 era capturada).
+                    await asyncio.sleep(5.0)
                     n = 2
                     while n <= max_pages:
                         clicked = await self._click_pagination(page, str(n))
