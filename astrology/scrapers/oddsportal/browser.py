@@ -303,14 +303,23 @@ class OddsPortalBrowser:
                         # fixo capturava a pagina antiga (sem hrefs novos) e o loop
                         # encerrava cedo -- Ligue 1 parava em 150 de ~306 jogos.
                         _h, _new = "", set()
-                        for _ in range(16):          # ate ~8s
-                            await asyncio.sleep(0.5)
-                            _h = await page.content()
-                            _new = set(re.findall(r'href="(/[^"]*?/h2h/[^"]+)"', _h)) - _seen_hrefs
+                        for _retry_click in range(2):   # 2026-09-06: 1 retry antes de desistir --
+                            for _ in range(16):          # ate ~8s
+                                await asyncio.sleep(0.5)
+                                _h = await page.content()
+                                _new = set(re.findall(r'href="(/[^"]*?/h2h/[^"]+)"', _h)) - _seen_hrefs
+                                if _new:
+                                    break
                             if _new:
                                 break
+                            # Sem novos hrefs: pode ser paginacao esgotada DE FATO
+                            # ou render lento (confirmado ao vivo: mesma URL deu
+                            # 1 pagina numa tentativa e 7 paginas noutra -- flake,
+                            # nao bug deterministico). Re-clica a MESMA pagina 1x
+                            # antes de concluir esgotamento.
+                            await self._click_pagination(page, str(n))
                         if not _new:
-                            break                    # paginacao esgotada de fato
+                            break                    # paginacao esgotada de fato (apos retry)
                         _seen_hrefs |= _new
                         htmls.append(_h)
                         n += 1
