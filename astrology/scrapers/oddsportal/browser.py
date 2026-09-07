@@ -285,7 +285,15 @@ class OddsPortalBrowser:
                     # requisicao de rede dispara; aos ~5s de espera pre-clique,
                     # funciona). Sem essa espera, TODA paginacao falhava
                     # silenciosamente (so a pagina 1 era capturada).
-                    await asyncio.sleep(5.0)
+                    # So paga a espera de 5s se realmente existir pagina 2 --
+                    # a maioria das listagens (temporadas/torneios pequenos) cabe
+                    # inteira na pagina 1, e nesses casos a espera era pura perda
+                    # de tempo (5s x milhares de listagens = horas desperdicadas).
+                    # O nav de paginacao e SSR'd (aparece no HTML estatico), entao
+                    # da pra checar sem esperar hidratacao.
+                    _has_page2 = bool(re.search(r'aria-label="Pagination"', first_html)) and                                  bool(re.search(r'>2</button>', first_html))
+                    if _has_page2:
+                        await asyncio.sleep(5.0)
                     n = 2
                     while n <= max_pages:
                         clicked = await self._click_pagination(page, str(n))
@@ -351,30 +359,42 @@ class OddsPortalBrowser:
             await asyncio.sleep(random.uniform(0.1, 0.25) if selector_ok else random.uniform(0.4, 0.7))
             main_html = await page.content()
 
-            # Captura tab ativa atual (ja renderizada — sem custo extra)
-            active_el = await page.query_selector('[data-testid="navigation-active-tab"]')
-            active_label = (await active_el.inner_text()).strip() if active_el else ""
+            # 2026-09-06: data-testid sumiu do site inteiro (mesma causa raiz dos
+            # outros bugs corrigidos nesta investigacao). Nova estrutura da nav de
+            # mercados: <li class="tab-item ... active-item-feed ..."><button>
+            # <span>Rotulo</span></button></li> -- a classe active-item-feed marca
+            # a aba ativa, sem equivalente antigo. Confirmado ao vivo: essa quebra
+            # explica por que over_under/asian_handicap/total_sets/total_games
+            # pararam de ser capturados (~jun/2026) enquanto home_away (lido da
+            # aba ja ativa, sem precisar clicar) continuou funcionando.
+            active_li = await page.query_selector("li.tab-item.active-item-feed")
+            active_label = (await active_li.inner_text()).strip() if active_li else ""
             if active_label:
                 result[active_label] = main_html
+
+            if tab_labels and any(l != active_label for l in tab_labels):
+                # Mesma licao da paginacao: o clique na aba e um no-op silencioso
+                # se disparado antes da hidratacao completa (nenhum erro, nenhuma
+                # mudanca de conteudo). Espera generosa antes do 1o clique.
+                await asyncio.sleep(5.0)
 
             for label in tab_labels:
                 if label == active_label:
                     continue
-                inactive_tabs = await page.query_selector_all('[data-testid="navigation-inactive-tab"]')
-                for tab in inactive_tabs:
+                tab_items = await page.query_selector_all("li.tab-item")
+                for tab in tab_items:
                     try:
                         text = (await tab.inner_text()).strip()
                         if text == label:
-                            await tab.click()
+                            btn = await tab.query_selector("button") or tab
+                            await btn.click()
                             tab_ok = False
-                            try:
-                                await page.wait_for_selector(
-                                    '[data-testid="over-under-expanded-row"]',
-                                    timeout=WAIT_TIMEOUT_MS,
-                                )
-                                tab_ok = True
-                            except Exception:
-                                pass
+                            for _ in range(16):          # ate ~8s
+                                await asyncio.sleep(0.5)
+                                cls = await tab.get_attribute("class") or ""
+                                if "active-item-feed" in cls:
+                                    tab_ok = True
+                                    break
                             await asyncio.sleep(random.uniform(0.15, 0.3) if tab_ok else random.uniform(0.3, 0.6))
                             result[label] = await page.content()
                             break
